@@ -101,3 +101,11 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 HybriOX Backend Proxy aktif dan berjalan di port ${PORT}`);
 });
+app.post('/api/verify-dev', (req, res) => {
+    const { password } = req.body;
+    if (password === process.env.DEV_SECRET_PASSWORD) {
+        return res.status(200).json({ success: true, message: "Sandi pengembang benar" });
+    } else {
+        return res.status(401).json({ success: false, message: "Sandi salah" });
+    }
+});
