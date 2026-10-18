@@ -1,7 +1,7 @@
 {
   "name": "hybriox-backend-proxy",
   "version": "1.0.0",
-  "type": "module"
+  "type": "module",
   "description": "Backend Proxy Server for HybriOX AI Terminal",
   "main": "server.js",
   "scripts": {
