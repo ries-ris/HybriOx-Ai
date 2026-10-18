@@ -74,6 +74,42 @@ app.post('/api/verify-dev', (req, res) => {
     }
 });
 
+// 3.2 ENDPOINT PENERIMA KONFIGURASI DEVELOPER & MASTER API KEYS (Ditambahkan di sini)
+app.post('/api/developer/config', (req, res) => {
+    try {
+        const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
+        
+        console.log('[Config Update] Menerima pembaruan kunci API master dari Panel Developer:', {
+            tier: tier || 'free',
+            hasTwelve: !!twelveApiKey,
+            hasFinnhub: !!finnhubKey,
+            hasAlpha: !!alphaVantageKey,
+            hasGemini: !!geminiApiKey
+        });
+
+        // Penyimpanan sementara di memori server / global state
+        global.SERVER_MASTER_CONFIG = {
+            twelveApiKey: twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo",
+            finnhubKey: finnhubKey || process.env.FINNHUB_API_KEY || "",
+            alphaVantageKey: alphaVantageKey || process.env.ALPHA_VANTAGE_API_KEY || "",
+            geminiApiKey: geminiApiKey || process.env.GEMINI_API_KEY || "",
+            tier: tier || 'free',
+            updatedAt: Date.now()
+        };
+
+        return res.json({ 
+            success: true, 
+            message: "Konfigurasi master API berhasil disinkronkan dan disimpan di server Render." 
+        });
+    } catch (error) {
+        return res.status(500).json({ 
+            success: false, 
+            error: "Gagal memproses konfigurasi di server.",
+            details: error.message 
+        });
+    }
+});
+
 // 3.1 ENDPOINT AUTO-COMPLETE PENCARIAN INSTRUMEN (Sesuai Permintaan)
 app.get('/api/symbols/search', (req, res) => {
     const q = (req.query.q || '').trim().toUpperCase();
