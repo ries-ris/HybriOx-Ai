@@ -3,18 +3,18 @@
  * - Full Multi-Provider Support (Twelve Data, Binance, Alpha Vantage / Fallbacks)
  * - Strict Master Registry Whitelist (25 Authorized Instruments)
  * - Zero Hardcoded Passwords & Zero Hardcoded API Keys (Strictly process.env / Dynamic Runtime)
- * - Real-time WebSocket, REST Proxy Mechanics & Developer Security Bridge
+ * - ES Module Syntax (Compatible with package.json "type": "module")
  */
 
-const express = require('express');
-const cors = require('cors');
-const axios = require('axios');
-const http = require('http');
-const WebSocket = require('ws');
+import express from 'express';
+import cors from 'cors';
+import axios from 'axios';
+import http from 'http';
+import { WebSocketServer } from 'ws';
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocketServer({ server });
 
 app.use(cors());
 app.use(express.json());
@@ -33,7 +33,6 @@ const MASTER_WHITELIST = [
 ];
 
 // 2. RUNTIME CONFIGURATION FOR API KEYS & PROVIDERS
-// Kunci API diatur secara dinamis melalui environment variable Render atau input frontend
 let runtimeConfig = {
     twelveApiKey: process.env.TWELVE_DATA_API_KEY || '',
     finnhubKey: process.env.FINNHUB_KEY || '',
@@ -58,7 +57,7 @@ const PROVIDERS = {
 const marketCache = new Map();
 const CACHE_TTL = 15000;
 
-// Helper function: Otomatisasi format penulisan simbol sesuai kebutuhan masing-masing provider
+// Helper function: Format penulisan simbol sesuai provider
 function formatSymbolForProvider(cleanSymbol, provider) {
     if (provider === 'twelveData') {
         if (cleanSymbol.length === 6 && !cleanSymbol.includes('/') && !['BTCUSD', 'ETHUSD'].includes(cleanSymbol)) {
@@ -90,7 +89,6 @@ app.post('/api/verify-dev', (req, res) => {
 app.post('/api/developer/config', (req, res) => {
     const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
 
-    // Perbarui nilai kunci secara dinamis di memori runtime server
     if (twelveApiKey !== undefined) runtimeConfig.twelveApiKey = twelveApiKey;
     if (finnhubKey !== undefined) runtimeConfig.finnhubKey = finnhubKey;
     if (alphaVantageKey !== undefined) runtimeConfig.alphaVantageKey = alphaVantageKey;
@@ -129,12 +127,10 @@ app.post('/api/validate-symbol', (req, res) => {
     }
 });
 
-// Multi-provider market data handler with dynamic runtime keys support
 app.get('/api/v1/market', async (req, res) => {
     const { symbol, interval = '1h', provider = 'twelveData' } = req.query;
     const cleanSymbol = (symbol || "").trim().toUpperCase();
 
-    // Early Exit: Strict Whitelist Check
     if (!MASTER_WHITELIST.includes(cleanSymbol)) {
         return res.status(403).json({ 
             error: "Access Denied", 
@@ -173,7 +169,6 @@ app.get('/api/v1/market', async (req, res) => {
             throw new Error("Provider tidak dikenal atau tidak didukung.");
         }
 
-        // Save to cache
         marketCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
         return res.json({ source: provider, data: responseData });
 
@@ -186,14 +181,13 @@ app.get('/api/v1/market', async (req, res) => {
     }
 });
 
-// Endpoint Sinkronisasi Sinyal
 app.post('/api/sync', (req, res) => {
     const tradeRecord = req.body;
     return res.json({ success: true, message: 'Rekam jejak sinyal berhasil disinkronkan ke server.', data: tradeRecord });
 });
 
 // 5. WEBSOCKET PROXY FOR REAL-TIME STREAMING
-wss.on('connection', (ws, req) => {
+wss.on('connection', (ws) => {
     console.log('[WebSocket] Klien frontend terhubung.');
 
     ws.on('message', (message) => {
