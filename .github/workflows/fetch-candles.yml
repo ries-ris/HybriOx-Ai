@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-    fetch-and-store:
+  fetch-and-store:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -27,4 +27,3 @@ jobs:
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
           PINHUB_API_KEY: ${{ secrets.PINHUB_API_KEY }}
         run: node fetch-candles.js
-
