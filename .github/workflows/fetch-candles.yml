@@ -26,4 +26,5 @@ jobs:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
           PINHUB_API_KEY: ${{ secrets.PINHUB_API_KEY }}
-        run: node server.js
+        run: node fetch-candles.js
+
