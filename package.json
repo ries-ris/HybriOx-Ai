@@ -2,7 +2,7 @@
   "name": "hybriox-backend-proxy",
   "version": "1.0.0",
   "type": "module",
-  "description": "Backend Proxy Server for HybriOX AI Terminal",
+  "description": "Backend Proxy Server for HybriOX",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -12,7 +12,8 @@
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "firebase-admin": "^12.0.0",
-    "ms": "^2.1.3"
+    "ms": "^2.1.3",
+    "ws": "^8.16.0"
   },
   "engines": {
     "node": ">=18.x"
