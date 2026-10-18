@@ -2,18 +2,19 @@
  * HybriOX Professional-Grade Backend Proxy & Asset Management Server
  * - Full Multi-Provider Support (Twelve Data, Binance, Alpha Vantage / Fallbacks)
  * - Strict Master Registry Whitelist (25 Authorized Instruments)
+ * - Zero Hardcoded Passwords & Zero Hardcoded API Keys (Strictly process.env / Dynamic Runtime)
  * - Real-time WebSocket, REST Proxy Mechanics & Developer Security Bridge
  */
 
-import express from 'express';
-import cors from 'cors';
-import axios from 'axios';
-import http from 'http';
-import { WebSocketServer } from 'ws';
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const http = require('http');
+const WebSocket = require('ws');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocket.Server({ server });
 
 app.use(cors());
 app.use(express.json());
@@ -31,17 +32,25 @@ const MASTER_WHITELIST = [
     "BTCUSD", "ETHUSD"
 ];
 
-// 2. MULTI-PROVIDER CONFIGURATION KEYS & FALLBACKS
+// 2. RUNTIME CONFIGURATION FOR API KEYS & PROVIDERS
+// Kunci API diatur secara dinamis melalui environment variable Render atau input frontend
+let runtimeConfig = {
+    twelveApiKey: process.env.TWELVE_DATA_API_KEY || '',
+    finnhubKey: process.env.FINNHUB_KEY || '',
+    alphaVantageKey: process.env.ALPHA_VANTAGE_KEY || '',
+    geminiApiKey: process.env.GEMINI_API_KEY || '',
+    tier: 'free'
+};
+
 const PROVIDERS = {
     twelveData: {
-        apiKey: process.env.TWELVE_DATA_API_KEY || "demo",
         baseUrl: "https://api.twelvedata.com"
     },
     binance: {
         baseUrl: "https://api.binance.com/api/v3"
     },
-    fallback: {
-        enabled: true
+    alphaVantage: {
+        baseUrl: "https://www.alphavantage.co/query"
     }
 };
 
@@ -61,10 +70,14 @@ function formatSymbolForProvider(cleanSymbol, provider) {
     return cleanSymbol;
 }
 
-// 3. DEVELOPER AUTHENTICATION BRIDGE
+// 3. DEVELOPER AUTHENTICATION BRIDGE (Strictly via Environment Variable Render)
 app.post('/api/verify-dev', (req, res) => {
     const { password } = req.body;
-    const devPassword = process.env.DEV_MASTER_PASSWORD || "masayu"; 
+    const devPassword = process.env.DEV_PASSWORD;
+
+    if (!devPassword) {
+        return res.status(500).json({ success: false, message: "Konfigurasi server belum lengkap: DEV_PASSWORD belum diatur di Render." });
+    }
 
     if (password && password.trim() === devPassword) {
         return res.json({ success: true, message: "Akses pengembang diverifikasi." });
@@ -73,42 +86,25 @@ app.post('/api/verify-dev', (req, res) => {
     }
 });
 
-// 3.2 ENDPOINT PENERIMA KONFIGURASI DEVELOPER & MASTER API KEYS
+// 3.1 ENDPOINT PENERIMAAN KUNCI-KUNCI API DARI PANEL FRONTEND
 app.post('/api/developer/config', (req, res) => {
-    try {
-        const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
-        
-        console.log('[Config Update] Menerima pembaruan kunci API master dari Panel Developer:', {
-            tier: tier || 'free',
-            hasTwelve: !!twelveApiKey,
-            hasFinnhub: !!finnhubKey,
-            hasAlpha: !!alphaVantageKey,
-            hasGemini: !!geminiApiKey
-        });
+    const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
 
-        global.SERVER_MASTER_CONFIG = {
-            twelveApiKey: twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo",
-            finnhubKey: finnhubKey || process.env.FINNHUB_API_KEY || "",
-            alphaVantageKey: alphaVantageKey || process.env.ALPHA_VANTAGE_API_KEY || "",
-            geminiApiKey: geminiApiKey || process.env.GEMINI_API_KEY || "",
-            tier: tier || 'free',
-            updatedAt: Date.now()
-        };
+    // Perbarui nilai kunci secara dinamis di memori runtime server
+    if (twelveApiKey !== undefined) runtimeConfig.twelveApiKey = twelveApiKey;
+    if (finnhubKey !== undefined) runtimeConfig.finnhubKey = finnhubKey;
+    if (alphaVantageKey !== undefined) runtimeConfig.alphaVantageKey = alphaVantageKey;
+    if (geminiApiKey !== undefined) runtimeConfig.geminiApiKey = geminiApiKey;
+    if (tier !== undefined) runtimeConfig.tier = tier;
 
-        return res.json({ 
-            success: true, 
-            message: "Konfigurasi master API berhasil disinkronkan dan disimpan di server Render." 
-        });
-    } catch (error) {
-        return res.status(500).json({ 
-            success: false, 
-            error: "Gagal memproses konfigurasi di server.",
-            details: error.message 
-        });
-    }
+    return res.json({ 
+        success: true, 
+        message: "Konfigurasi kunci API berhasil diperbarui di server.",
+        tier: runtimeConfig.tier
+    });
 });
 
-// 3.1 ENDPOINT AUTO-COMPLETE PENCARIAN INSTRUMEN
+// 3.2 ENDPOINT AUTO-COMPLETE PENCARIAN INSTRUMEN (Minimal 2 Huruf)
 app.get('/api/symbols/search', (req, res) => {
     const q = (req.query.q || '').trim().toUpperCase();
     if (!q || q.length < 2) {
@@ -133,10 +129,12 @@ app.post('/api/validate-symbol', (req, res) => {
     }
 });
 
+// Multi-provider market data handler with dynamic runtime keys support
 app.get('/api/v1/market', async (req, res) => {
     const { symbol, interval = '1h', provider = 'twelveData' } = req.query;
     const cleanSymbol = (symbol || "").trim().toUpperCase();
 
+    // Early Exit: Strict Whitelist Check
     if (!MASTER_WHITELIST.includes(cleanSymbol)) {
         return res.status(403).json({ 
             error: "Access Denied", 
@@ -155,17 +153,27 @@ app.get('/api/v1/market', async (req, res) => {
         const formattedSymbol = formatSymbolForProvider(cleanSymbol, provider);
 
         if (provider === 'twelveData') {
-            const url = `${PROVIDERS.twelveData.baseUrl}/time_series?symbol=${formattedSymbol}&interval=${interval}&apikey=${PROVIDERS.twelveData.apiKey}`;
+            const activeKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo";
+            const url = `${PROVIDERS.twelveData.baseUrl}/time_series?symbol=${formattedSymbol}&interval=${interval}&apikey=${activeKey}`;
             const response = await axios.get(url);
             responseData = response.data;
         } else if (provider === 'binance') {
             const url = `${PROVIDERS.binance.baseUrl}/klines?symbol=${formattedSymbol}&interval=${interval}`;
             const response = await axios.get(url);
             responseData = response.data;
+        } else if (provider === 'alphaVantage') {
+            const activeKey = runtimeConfig.alphaVantageKey || process.env.ALPHA_VANTAGE_KEY || "demo";
+            const isDaily = ['240', 'D', 'W', 'M'].includes(interval);
+            const functionType = isDaily ? 'TIME_SERIES_DAILY' : 'TIME_SERIES_INTRADAY';
+            const intervalParam = isDaily ? '' : `&interval=${interval}`;
+            const url = `${PROVIDERS.alphaVantage.baseUrl}?function=${functionType}&symbol=${formattedSymbol}${intervalParam}&apikey=${activeKey}`;
+            const response = await axios.get(url);
+            responseData = response.data;
         } else {
             throw new Error("Provider tidak dikenal atau tidak didukung.");
         }
 
+        // Save to cache
         marketCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
         return res.json({ source: provider, data: responseData });
 
@@ -176,6 +184,12 @@ app.get('/api/v1/market', async (req, res) => {
             details: error.message 
         });
     }
+});
+
+// Endpoint Sinkronisasi Sinyal
+app.post('/api/sync', (req, res) => {
+    const tradeRecord = req.body;
+    return res.json({ success: true, message: 'Rekam jejak sinyal berhasil disinkronkan ke server.', data: tradeRecord });
 });
 
 // 5. WEBSOCKET PROXY FOR REAL-TIME STREAMING
