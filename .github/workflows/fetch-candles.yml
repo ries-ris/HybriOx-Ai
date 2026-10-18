@@ -2,9 +2,9 @@ name: HybriOx-AI Data Pipeline
 
 on:
   schedule:
-    # Berjalan setiap 30 menit, dengan estimasi menghindari jam istirahat 00:00 - 05:30 WIB (17:00 - 22:30 UTC)
-    - cron: '*/30 22-16 * * *'
-  workflow_dispatch: # Memungkinkan Anda menjalankan manual kapan saja dari tab Actions GitHub
+    # Berjalan setiap 30 menit
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
   fetch-macro-data:
