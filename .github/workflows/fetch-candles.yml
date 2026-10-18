@@ -1,12 +1,13 @@
-name: Auto Fetch M30 Candles to Firestore
+name: HybriOx-AI Data Pipeline
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    # Berjalan setiap 30 menit, dengan estimasi menghindari jam istirahat 00:00 - 05:30 WIB (17:00 - 22:30 UTC)
+    - cron: '*/30 22-16 * * *'
+  workflow_dispatch: # Memungkinkan Anda menjalankan manual kapan saja dari tab Actions GitHub
 
 jobs:
-  fetch-and-store:
+  fetch-macro-data:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -18,12 +19,12 @@ jobs:
           node-version: '20'
 
       - name: Install Dependencies
-        run: npm install firebase-admin axios
+        run: npm install firebase-admin
 
-      - name: Execute Fetcher Script
+      - name: Run Fetch Candles Script
         env:
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
-          PINHUB_API_KEY: ${{ secrets.PINHUB_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: node fetch-candles.js
