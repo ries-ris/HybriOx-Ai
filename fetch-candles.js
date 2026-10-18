@@ -2,16 +2,17 @@ const admin = require('firebase-admin');
 const axios = require('axios');
 
 // ==========================================
-// 1. LOGIKA ISTIRAHAT MALAM (00.00 - 06.30 WIB)
+// 1. LOGIKA ISTIRAHAT MALAM (00.00 - 05.30 WIB)
 // ==========================================
 const now = new Date();
 const utcHours = now.getUTCHours();
 const utcMinutes = now.getUTCMinutes();
-const wibHours = (utcHours + 7) % 24;
-const totalMinutesWIB = wibHours * 60 + utcMinutes;
-
-if (totalMinutesWIB >= 0 && totalMinutesWIB < 390) {
-    console.log("Waktu istirahat malam (00.00 - 06.30 WIB). Skrip melewati eksekusi untuk menghemat kuota API.");
+// Konversi ke Waktu Indonesia Barat (WIB = UTC + 7)
+let wibHours = (utcHours + 7) % 24;
+let totalMinutesWIB = wibHours * 60 + utcMinutes;
+// 00.00 WIB = 0 menit, 05.30 WIB = (5 * 60) + 30 = 330 menit
+if (totalMinutesWIB >= 0 && totalMinutesWIB < 330) {
+    console.log("Waktu istirahat malam (00.00 - 05.30 WIB). Skrip melewati eksekusi untuk menghemat kuota API.");
     process.exit(0);
 }
 
@@ -36,93 +37,151 @@ try {
 const db = admin.firestore();
 
 // ==========================================
-// 3. FUNGSI UTAMA PENGAMBILAN DATA (3 PROVIDER - 400 CANDLE)
+// 3. DAFTAR 5 PAIR & KONFIGURASI 3 PROVIDER
+// ==========================================
+const TARGET_PAIRS = ['XAUUSD', 'EURUSD', 'GBPUSD', 'GBPJPY', 'AUDUSD'];
+
+// Provider 1: Twelve Data
+async function fetchTwelveData(symbol, apiKey) {
+    if (!apiKey) return null;
+    const formattedSymbol = symbol.length === 6 ? `${symbol.slice(0, 3)}/${symbol.slice(3)}` : symbol;
+    try {
+        const res = await axios.get(`https://api.twelvedata.com/time_series`, {
+            params: {
+                symbol: formattedSymbol,
+                interval: '30min',
+                outputsize: 400,
+                apikey: apiKey
+            },
+            timeout: 10000
+        });
+        if (res.data && res.data.values && res.data.values.length > 0) {
+            return res.data.values.slice(0, 400);
+        }
+    } catch (err) {
+        console.warn(`[Twelve Data] Gagal untuk ${symbol}: ${err.message}`);
+    }
+    return null;
+}
+
+// Provider 2: Alpha Vantage (Fallback 1)
+async function fetchAlphaVantage(symbol, apiKey) {
+    if (!apiKey) return null;
+    const fromSymbol = symbol.slice(0, 3);
+    const toSymbol = symbol.slice(3);
+    try {
+        const res = await axios.get(`https://www.alphavantage.co/query`, {
+            params: {
+                function: 'FX_INTRADAY',
+                from_symbol: fromSymbol,
+                to_symbol: toSymbol,
+                interval: '30min',
+                outputsize: 'full',
+                apikey: apiKey
+            },
+            timeout: 10000
+        });
+        const key = 'Time Series FX (30min)';
+        if (res.data && res.data[key]) {
+            const raw = res.data[key];
+            return Object.keys(raw).slice(0, 400).map(time => ({
+                datetime: time,
+                open: raw[time]['1. open'],
+                high: raw[time]['2. high'],
+                low: raw[time]['3. low'],
+                close: raw[time]['4. close'],
+                volume: raw[time]['5. volume'] || '0'
+            }));
+        }
+    } catch (err) {
+        console.warn(`[Alpha Vantage] Gagal untuk ${symbol}: ${err.message}`);
+    }
+    return null;
+}
+
+// Provider 3: Pin Hub (Fallback 2)
+async function fetchPinHub(symbol, apiKey) {
+    if (!apiKey) return null;
+    try {
+        const res = await axios.get(`https://api.pinhub.com/v1/candles`, {
+            params: {
+                symbol: symbol,
+                interval: '30min',
+                limit: 400,
+                apiKey: apiKey
+            },
+            timeout: 10000
+        });
+        if (res.data && res.data.candles) {
+            return res.data.candles.slice(0, 400);
+        }
+    } catch (err) {
+        console.warn(`[Pin Hub] Gagal untuk ${symbol}: ${err.message}`);
+    }
+    return null;
+}
+
+// ==========================================
+// 4. EKSKUSI UTAMA (FAILOVER & ROLLING OVERWRITE)
 // ==========================================
 async function main() {
-    console.log("Memulai siklus fetcher M30 dari Twelve Data, Alpha Vantage, dan Pin Hub...");
+    console.log(`Memulai siklus fetcher M30 untuk ${TARGET_PAIRS.length} pair...`);
 
-    const twelveApiKey = process.env.TWELVE_DATA_API_KEY;
-    const alphaApiKey = process.env.ALPHA_VANTAGE_API_KEY;
-    const pinhubApiKey = process.env.PINHUB_API_KEY;
+    const twelveKey = process.env.TWELVE_DATA_API_KEY;
+    const alphaKey = process.env.ALPHA_VANTAGE_API_KEY;
+    const pinhubKey = process.env.PINHUB_API_KEY;
 
-    let twelveDataCandles = [];
-    let alphaVantageCandles = [];
-    let pinHubCandles = [];
+    const payloadData = {};
+
+    for (const pair of TARGET_PAIRS) {
+        console.log(`\n--- Memproses Pair: ${pair} ---`);
+        let candles = null;
+        let activeProvider = '';
+
+        // Urutan Failover: Twelve Data -> Alpha Vantage -> Pin Hub
+        candles = await fetchTwelveData(pair, twelveKey);
+        if (candles) {
+            activeProvider = 'Twelve Data';
+        } else {
+            console.log(`Mencoba Fallback ke Alpha Vantage untuk ${pair}...`);
+            candles = await fetchAlphaVantage(pair, alphaKey);
+            if (candles) {
+                activeProvider = 'Alpha Vantage';
+            } else {
+                console.log(`Mencoba Fallback ke Pin Hub untuk ${pair}...`);
+                candles = await fetchPinHub(pair, pinhubKey);
+                if (candles) {
+                    activeProvider = 'Pin Hub';
+                }
+            }
+        }
+
+        if (candles && candles.length > 0) {
+            payloadData[pair] = {
+                provider: activeProvider,
+                count: candles.length,
+                candles: candles
+            };
+            console.log(`[SUKSES] ${pair}: Berhasil mengambil ${candles.length} candle via ${activeProvider}`);
+        } else {
+            console.error(`[GAGAL TOTAL] Semua provider gagal mengambil data untuk ${pair}`);
+        }
+    }
 
     try {
-        // 1. Fetch Twelve Data (Target 400 candles via outputsize=400)
-        if (twelveApiKey) {
-            console.log("Mengambil data dari Twelve Data...");
-            const twelveRes = await axios.get(`https://api.twelvedata.com/time_series`, {
-                params: {
-                    symbol: 'EUR/USD',
-                    interval: '30min',
-                    outputsize: 400,
-                    apikey: twelveApiKey
-                }
-            });
-            if (twelveRes.data && twelveRes.data.values) {
-                twelveDataCandles = twelveRes.data.values;
-                console.log(`Berhasil mengambil ${twelveDataCandles.length} candles dari Twelve Data.`);
-            }
-        }
+        // ROLLING WINDOW: Overwrite dokumen 'latest_m30' di Firestore agar konsisten 400 candle
+        await db.collection('macro_candles').doc('latest_m30').set({
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            status: 'Rolling Window Active (400 Candles Overwrite)',
+            pairs: TARGET_PAIRS,
+            data: payloadData
+        }, { merge: false }); // merge: false memastikan penimpaan bersih (overwrite total)
 
-        // 2. Fetch Alpha Vantage (Target 400 candles)
-        if (alphaApiKey) {
-            console.log("Mengambil data dari Alpha Vantage...");
-            const alphaRes = await axios.get(`https://www.alphavantage.co/query`, {
-                params: {
-                    function: 'FX_INTRADAY',
-                    from_symbol: 'EUR',
-                    to_symbol: 'USD',
-                    interval: '30min',
-                    outputsize: 'full',
-                    apikey: alphaApiKey
-                }
-            });
-            const timeSeriesKey = 'Time Series FX (30min)';
-            if (alphaRes.data && alphaRes.data[timeSeriesKey]) {
-                const rawData = alphaRes.data[timeSeriesKey];
-                alphaVantageCandles = Object.keys(rawData).slice(0, 400).map(time => ({
-                    datetime: time,
-                    ...rawData[time]
-                }));
-                console.log(`Berhasil memproses ${alphaVantageCandles.length} candles dari Alpha Vantage.`);
-            }
-        }
-
-        // 3. Fetch Pin Hub
-        if (pinhubApiKey) {
-            console.log("Mengambil data dari Pin Hub...");
-            const pinHubRes = await axios.get(`https://api.pinhub.com/v1/candles`, {
-                params: {
-                    symbol: 'EURUSD',
-                    interval: '30min',
-                    limit: 400,
-                    apiKey: pinhubApiKey
-                }
-            });
-            if (pinHubRes.data && pinHubRes.data.candles) {
-                pinHubCandles = pinHubRes.data.candles.slice(0, 400);
-                console.log(`Berhasil mengambil ${pinHubCandles.length} candles dari Pin Hub.`);
-            }
-        }
-
-        // Simpan semua data hasil fetch ke Firestore
-        await db.collection('macro_candles').add({
-            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            status: 'Success fetch 400 candles',
-            providers: ['Twelve Data', 'Alpha Vantage', 'Pin Hub'],
-            data: {
-                twelveData: twelveDataCandles,
-                alphaVantage: alphaVantageCandles,
-                pinHub: pinHubCandles
-            }
-        });
-        
-        console.log("Data 400 candles dari ketiga provider berhasil disimpan ke Firebase Firestore!");
+        console.log("\n====================================================");
+        console.log("SUKSES: Firestore (latest_m30) berhasil diperbarui secara rolling!");
+        console.log("====================================================");
     } catch (error) {
-        console.error("Terjadi kesalahan saat mengambil atau menyimpan data:", error.message);
+        console.error("Gagal memperbarui Firestore:", error.message);
         process.exit(1);
     }
 }
