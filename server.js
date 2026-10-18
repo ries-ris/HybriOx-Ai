@@ -5,15 +5,15 @@
  * - Real-time WebSocket, REST Proxy Mechanics & Developer Security Bridge
  */
 
-const express = require('express');
-const cors = require('cors');
-const axios = require('axios');
-const http = require('http');
-const WebSocket = require('ws');
+import express from 'express';
+import cors from 'cors';
+import axios from 'axios';
+import http from 'http';
+import { WebSocketServer } from 'ws';
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocketServer({ server });
 
 app.use(cors());
 app.use(express.json());
@@ -61,10 +61,9 @@ function formatSymbolForProvider(cleanSymbol, provider) {
     return cleanSymbol;
 }
 
-// 3. DEVELOPER AUTHENTICATION BRIDGE (Memperbaiki tombol sandi panel developer agar merespons)
+// 3. DEVELOPER AUTHENTICATION BRIDGE
 app.post('/api/verify-dev', (req, res) => {
     const { password } = req.body;
-    // Tentukan sandi master developer (bisa disesuaikan dengan environment variable atau default aman)
     const devPassword = process.env.DEV_MASTER_PASSWORD || "masayu"; 
 
     if (password && password.trim() === devPassword) {
@@ -74,7 +73,7 @@ app.post('/api/verify-dev', (req, res) => {
     }
 });
 
-// 3.2 ENDPOINT PENERIMA KONFIGURASI DEVELOPER & MASTER API KEYS (Ditambahkan di sini)
+// 3.2 ENDPOINT PENERIMA KONFIGURASI DEVELOPER & MASTER API KEYS
 app.post('/api/developer/config', (req, res) => {
     try {
         const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
@@ -87,7 +86,6 @@ app.post('/api/developer/config', (req, res) => {
             hasGemini: !!geminiApiKey
         });
 
-        // Penyimpanan sementara di memori server / global state
         global.SERVER_MASTER_CONFIG = {
             twelveApiKey: twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo",
             finnhubKey: finnhubKey || process.env.FINNHUB_API_KEY || "",
@@ -110,13 +108,12 @@ app.post('/api/developer/config', (req, res) => {
     }
 });
 
-// 3.1 ENDPOINT AUTO-COMPLETE PENCARIAN INSTRUMEN (Sesuai Permintaan)
+// 3.1 ENDPOINT AUTO-COMPLETE PENCARIAN INSTRUMEN
 app.get('/api/symbols/search', (req, res) => {
     const q = (req.query.q || '').trim().toUpperCase();
     if (!q || q.length < 2) {
         return res.json({ success: true, symbols: [] });
     }
-    // Mencocokkan dari MASTER_WHITELIST berdasarkan kata kunci yang diketik pengguna
     const filtered = MASTER_WHITELIST.filter(symbol => symbol.includes(q));
     res.json({ success: true, symbols: filtered });
 });
@@ -136,12 +133,10 @@ app.post('/api/validate-symbol', (req, res) => {
     }
 });
 
-// Multi-provider market data handler with automatic symbol formatting support
 app.get('/api/v1/market', async (req, res) => {
     const { symbol, interval = '1h', provider = 'twelveData' } = req.query;
     const cleanSymbol = (symbol || "").trim().toUpperCase();
 
-    // Early Exit: Strict Whitelist Check
     if (!MASTER_WHITELIST.includes(cleanSymbol)) {
         return res.status(403).json({ 
             error: "Access Denied", 
@@ -171,7 +166,6 @@ app.get('/api/v1/market', async (req, res) => {
             throw new Error("Provider tidak dikenal atau tidak didukung.");
         }
 
-        // Save to cache
         marketCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
         return res.json({ source: provider, data: responseData });
 
