@@ -19,7 +19,7 @@ jobs:
           node-version: '20'
 
       - name: Install Dependencies
-        run: npm install firebase-admin
+        run: npm install
 
       - name: Run Fetch Candles Script
         env:
