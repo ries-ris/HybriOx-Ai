@@ -69,6 +69,39 @@ function formatSymbolForProvider(cleanSymbol, provider) {
     return cleanSymbol;
 }
 
+// ENDPOINT: Mengambil bundel data makro global (latest_m30) dari Firestore untuk Frontend
+app.get('/api/macro/latest', async (req, res) => {
+    try {
+        // Pastikan variabel 'db' (Firestore) sudah diinisialisasi di server.js
+        if (typeof db === 'undefined' || !db) {
+            return res.status(500).json({ 
+                success: false, 
+                message: 'Database Firestore belum diinisialisasi di server.js' 
+            });
+        }
+
+        let docRef = db.collection('macro_candles').doc('latest_m30');
+        let docSnap = await docRef.get();
+
+        if (!docSnap.exists) {
+            return res.status(404).json({ 
+                success: false, 
+                message: 'Bundel data makro latest_m30 belum tersedia.' 
+            });
+        }
+
+        // Mengirimkan data ke frontend dalam format JSON
+        return res.json(docSnap.data());
+
+    } catch (error) {
+        console.error('Error mengambil latest_m30:', error);
+        return res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
 // 3. DEVELOPER AUTHENTICATION BRIDGE (Strictly via Environment Variable Render)
 app.post('/api/verify-dev', (req, res) => {
     const { password } = req.body;
