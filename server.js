@@ -303,3 +303,23 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`HybriOX Backend aktif dan berjalan pada port ${PORT}`);
 });
+
+app.post('/api/developer/config', async (req, res) => {
+    try {
+        const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
+        
+        const db = admin.firestore();
+        await db.collection('settings').doc('master_config').set({
+            twelveApiKey: twelveApiKey || '',
+            finnhubKey: finnhubKey || '',
+            alphaVantageKey: alphaVantageKey || '',
+            geminiApiKey: geminiApiKey || '',
+            tier: tier || 'free',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+
+        res.status(200).json({ success: true, message: 'Berhasil!' });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
