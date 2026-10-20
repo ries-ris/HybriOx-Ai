@@ -11,6 +11,24 @@ import cors from 'cors';
 import axios from 'axios';
 import http from 'http';
 import { WebSocketServer } from 'ws';
+import admin from 'firebase-admin';
+
+// Inisialisasi Firebase Admin untuk Backend
+if (!admin.apps.length) {
+    try {
+        if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+            const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+            admin.initializeApp({
+                credential: admin.credential.cert(serviceAccount)
+            });
+        } else {
+            admin.initializeApp();
+        }
+    } catch (e) {
+        console.log("Firebase Admin init notice:", e.message);
+    }
+}
+const db = admin.apps.length ? admin.firestore() : null;
 
 const app = express();
 const server = http.createServer(app);
@@ -40,6 +58,29 @@ let runtimeConfig = {
     geminiApiKey: process.env.GEMINI_API_KEY || '',
     tier: 'free'
 };
+
+// Fungsi memuat ulang konfigurasi Global API Keys dari Firebase saat server menyala
+async function loadGlobalConfigFromFirebase() {
+    try {
+        if (db) {
+            let docSnap = await db.collection('settings').doc('global_config').get();
+            if (docSnap.exists) {
+                let data = docSnap.data();
+                runtimeConfig.twelveApiKey = data.twelveApiKey !== undefined ? data.twelveApiKey : (process.env.TWELVE_DATA_API_KEY || '');
+                runtimeConfig.finnhubKey = data.finnhubKey !== undefined ? data.finnhubKey : (process.env.FINNHUB_KEY || '');
+                runtimeConfig.alphaVantageKey = data.alphaVantageKey !== undefined ? data.alphaVantageKey : (process.env.ALPHA_VANTAGE_KEY || '');
+                runtimeConfig.geminiApiKey = data.geminiApiKey !== undefined ? data.geminiApiKey : (process.env.GEMINI_API_KEY || '');
+                runtimeConfig.tier = data.tier || 'free';
+                console.log('[Server Startup] Global API Keys berhasil disinkronkan dari Firebase Firestore.');
+            }
+        }
+    } catch (error) {
+        console.log('[Server Startup] Menggunakan konfigurasi default Environment Variables.');
+    }
+}
+
+// Jalankan sinkronisasi saat server aktif
+loadGlobalConfigFromFirebase();
 
 const PROVIDERS = {
     twelveData: {
@@ -72,11 +113,10 @@ function formatSymbolForProvider(cleanSymbol, provider) {
 // ENDPOINT: Mengambil bundel data makro global (latest_m30) dari Firestore untuk Frontend
 app.get('/api/macro/latest', async (req, res) => {
     try {
-        // Pastikan variabel 'db' (Firestore) sudah diinisialisasi di server.js
-        if (typeof db === 'undefined' || !db) {
+        if (!db) {
             return res.status(500).json({ 
                 success: false, 
-                message: 'Database Firestore belum diinisialisasi di server.js' 
+                message: 'Database Firestore belum diinisialisasi di server.' 
             });
         }
 
@@ -90,7 +130,6 @@ app.get('/api/macro/latest', async (req, res) => {
             });
         }
 
-        // Mengirimkan data ke frontend dalam format JSON
         return res.json(docSnap.data());
 
     } catch (error) {
@@ -118,21 +157,44 @@ app.post('/api/verify-dev', (req, res) => {
     }
 });
 
-// 3.1 ENDPOINT PENERIMAAN KUNCI-KUNCI API DARI PANEL FRONTEND
-app.post('/api/developer/config', (req, res) => {
-    const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
+// 3.1 ENDPOINT MANAJEMEN KUNCI API GLOBAL (TAMBAH, EDIT, HAPUS) & SIMPAN KE FIREBASE
+app.post('/api/developer/config', async (req, res) => {
+    try {
+        const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
 
-    if (twelveApiKey !== undefined) runtimeConfig.twelveApiKey = twelveApiKey;
-    if (finnhubKey !== undefined) runtimeConfig.finnhubKey = finnhubKey;
-    if (alphaVantageKey !== undefined) runtimeConfig.alphaVantageKey = alphaVantageKey;
-    if (geminiApiKey !== undefined) runtimeConfig.geminiApiKey = geminiApiKey;
-    if (tier !== undefined) runtimeConfig.tier = tier;
+        if (twelveApiKey !== undefined) runtimeConfig.twelveApiKey = twelveApiKey.trim();
+        if (finnhubKey !== undefined) runtimeConfig.finnhubKey = finnhubKey.trim();
+        if (alphaVantageKey !== undefined) runtimeConfig.alphaVantageKey = alphaVantageKey.trim();
+        if (geminiApiKey !== undefined) runtimeConfig.geminiApiKey = geminiApiKey.trim();
+        if (tier !== undefined) runtimeConfig.tier = tier;
 
-    return res.json({ 
-        success: true, 
-        message: "Konfigurasi kunci API berhasil diperbarui di server.",
-        tier: runtimeConfig.tier
-    });
+        // Simpan perubahan secara permanen ke Firebase Firestore
+        if (db) {
+            await db.collection('settings').doc('global_config').set({
+                twelveApiKey: runtimeConfig.twelveApiKey,
+                finnhubKey: runtimeConfig.finnhubKey,
+                alphaVantageKey: runtimeConfig.alphaVantageKey,
+                geminiApiKey: runtimeConfig.geminiApiKey,
+                tier: runtimeConfig.tier,
+                updatedAt: new Date().toISOString()
+            }, { merge: true });
+        }
+
+        return res.json({ 
+            success: true, 
+            message: "Konfigurasi kunci API global berhasil diperbarui, disimpan ke Firebase, dan terhubung aktif ke Provider/AI.",
+            config: {
+                tier: runtimeConfig.tier,
+                hasTwelve: !!runtimeConfig.twelveApiKey,
+                hasFinnhub: !!runtimeConfig.finnhubKey,
+                hasAlpha: !!runtimeConfig.alphaVantageKey,
+                hasGemini: !!runtimeConfig.geminiApiKey
+            }
+        });
+    } catch (error) {
+        console.error('Gagal memperbarui konfigurasi developer ke Firebase:', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 // 3.2 ENDPOINT AUTO-COMPLETE PENCARIAN INSTRUMEN (Minimal 2 Huruf)
