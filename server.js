@@ -168,7 +168,7 @@ app.post('/api/developer/config', async (req, res) => {
         if (geminiApiKey !== undefined) runtimeConfig.geminiApiKey = geminiApiKey.trim();
         if (tier !== undefined) runtimeConfig.tier = tier;
 
-        // Simpan perubahan secara permanen ke Firebase Firestore
+        // Simpan perubahan secara permanen ke Firebase Firestore (koleksi settings, dokumen global_config)
         if (db) {
             await db.collection('settings').doc('global_config').set({
                 twelveApiKey: runtimeConfig.twelveApiKey,
@@ -182,7 +182,7 @@ app.post('/api/developer/config', async (req, res) => {
 
         return res.json({ 
             success: true, 
-            message: "Konfigurasi kunci API global berhasil diperbarui, disimpan ke Firebase, dan terhubung aktif ke Provider/AI.",
+            message: "Berhasil!",
             config: {
                 tier: runtimeConfig.tier,
                 hasTwelve: !!runtimeConfig.twelveApiKey,
@@ -302,24 +302,4 @@ wss.on('connection', (ws) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`HybriOX Backend aktif dan berjalan pada port ${PORT}`);
-});
-
-app.post('/api/developer/config', async (req, res) => {
-    try {
-        const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
-        
-        const db = admin.firestore();
-        await db.collection('settings').doc('master_config').set({
-            twelveApiKey: twelveApiKey || '',
-            finnhubKey: finnhubKey || '',
-            alphaVantageKey: alphaVantageKey || '',
-            geminiApiKey: geminiApiKey || '',
-            tier: tier || 'free',
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-
-        res.status(200).json({ success: true, message: 'Berhasil!' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
 });
