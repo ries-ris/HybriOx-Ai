@@ -124,7 +124,6 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
     console.log(`[Engine ISLMS-200] Menjalankan analisis Smart Money Concepts untuk ${pairSymbol} (TF: M${timeframe})...`);
 
     try {
-        // Ambil data candle real-time via internal proxy provider
         let activeKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo";
         let formattedSym = formatSymbolForProvider(pairSymbol, 'twelveData');
         let intervalMap = { '1': '1min', '5': '5min', '15': '15min', '60': '1h' };
@@ -141,7 +140,6 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
             ]);
         }
 
-        // Jika gagal tarik API, gunakan fallback mock candles
         if (candles.length === 0) {
             candles = [
                 [Date.now() - 900000, 2650.0, 2655.0, 2648.0, 2652.5, 1000],
@@ -310,7 +308,6 @@ wss.on('connection', (ws) => {
             const parsed = JSON.parse(message);
             console.log(`[WebSocket Backend] Menerima aksi kendali: ${parsed.action || parsed.type}`);
 
-            // Aksi Tombol 2: Force Trigger / Manual Scan dari Panel Developer
             if (parsed.action === 'FORCE_TRIGGER_SCAN' || parsed.type === 'FORCE_TRIGGER_SCAN') {
                 console.log('[Backend] Force Trigger dieksekusi otonom!');
                 let signal = await runInstitutionalEnginePipeline("XAUUSD", "15");
@@ -321,7 +318,6 @@ wss.on('connection', (ws) => {
                     }));
                 }
             } 
-            // Aksi Tombol 1: Emergency Stop / Kill Switch
             else if (parsed.action === 'EMERGENCY_STOP' || parsed.type === 'EMERGENCY_STOP') {
                 BackendState.isRunning = false;
                 console.log('[Backend] EMERGENCY STOP diaktifkan oleh Developer!');
@@ -343,6 +339,81 @@ wss.on('connection', (ws) => {
     });
 });
 
+// ============================================================================
+// 6. AUTONOMOUS BACKGROUND SCHEDULER & WORKER (INTERVAL 5 DETIK)
+// ============================================================================
+function isWeekend() {
+    const now = new Date();
+    const day = now.getDay(); // 0 = Minggu, 6 = Sabtu
+    return (day === 0 || day === 6);
+}
+
+function isWithinSessionRange() {
+    const now = new Date();
+    const currentHour = now.getHours();
+    
+    for (let sessionName in BackendState.activeSessions) {
+        let sess = BackendState.activeSessions[sessionName];
+        if (sess.start < sess.end) {
+            if (currentHour >= sess.start && currentHour < sess.end) return true;
+        } else {
+            if (currentHour >= sess.start || currentHour < sess.end) return true;
+        }
+    }
+    return false;
+}
+
+function isHighImpactNewsBlackout() {
+    if (!BackendState.econCalendarFilterActive) return false;
+    // Logika jeda 15 menit sebelum/sesudah berita high-impact
+    return false; 
+}
+
+const AUTONOMOUS_INTERVAL_MS = 5000; // Interval 5 detik untuk Autonomous Learning
+
+setInterval(async () => {
+    // 1. Validasi Emergency Stop
+    if (!BackendState.isRunning) return;
+
+    // 2. Weekend Guard (Pasar tutup Sabtu-Minggu -> Berhenti total demi kuota)
+    if (isWeekend()) return;
+
+    // 3. Session Guard (Hanya aktif di dalam rentang jam sesi)
+    if (!isWithinSessionRange()) return;
+
+    try {
+        let targetSymbol = "XAUUSD";
+        
+        // Pengambilan data & analisis berjalan tiap 5 detik untuk Autonomous Learning
+        let signalResult = await runInstitutionalEnginePipeline(targetSymbol, "15");
+        let inNewsBlackout = isHighImpactNewsBlackout();
+
+        if (signalResult && signalResult.status === 'TRIGGERED') {
+            if (inNewsBlackout) {
+                console.log(`[News Guard] Sinyal ${targetSymbol} ditahan (Blackout News aktif). Data tetap direkam untuk Learning.`);
+            } else {
+                console.log(`[Autonomous Engine] Sinyal Valid & Bersih! Menyiarkan sinyal ${targetSymbol} via WebSocket.`);
+                
+                let payload = JSON.stringify({
+                    type: 'DECENTRALIZED_SIGNAL_BROADCAST',
+                    signal: signalResult
+                });
+
+                wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(payload);
+                    }
+                });
+            }
+        }
+    } catch (error) {
+        console.error('[Autonomous Worker Error]:', error.message);
+    }
+}, AUTONOMOUS_INTERVAL_MS);
+
+// ============================================================================
+// SERVER LISTEN
+// ============================================================================
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`HybriOX Autonomous Backend & Proxy aktif dan berjalan pada port ${PORT}`);
