@@ -71,6 +71,9 @@ let BackendState = {
     }
 };
 
+// Penyimpanan State Cooldown di Sisi Server (Mencegah Spam Sinyal WebSocket)
+const backendLastSignalRecord = {};
+
 // Fungsi memuat ulang konfigurasi Global API Keys dari Firebase saat server menyala
 async function loadGlobalConfigFromFirebase() {
     try {
@@ -148,7 +151,49 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
             ];
         }
 
+        // Jalankan evaluasi ISLMS-200 & Gate 4
         let signalResult = evaluateSmartMoneyConcepts(candles, pairSymbol, timeframe);
+
+        // Validasi Cooldown & Release Threshold Berbasis ATR
+        if (signalResult && signalResult.status === 'TRIGGERED') {
+            let currentCandleTime = candles[candles.length - 1][0];
+            let currentPrice = candles[candles.length - 1][4];
+            let stratContextKey = `${pairSymbol}_${timeframe}_strat_islms_200`;
+            let lastStratRecord = backendLastSignalRecord[stratContextKey];
+
+            // Kalkulasi ATR untuk acuan baseline release
+            let trList = [];
+            for (let i = 1; i < candles.length; i++) {
+                let high = candles[i][2], low = candles[i][3], prevClose = candles[i - 1][4];
+                trList.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
+            }
+            let currentAtr = trList.slice(-14).reduce((a, b) => a + b, 0) / 14 || (currentPrice * 0.001);
+
+            if (lastStratRecord && currentCandleTime <= lastStratRecord.candleTime) {
+                let baselineAtr = lastStratRecord.snapshotAtr > 0 ? lastStratRecord.snapshotAtr : (currentPrice * 0.001);
+                let isReleased = Math.abs(currentPrice - lastStratRecord.price) >= (baselineAtr * 0.5);
+                
+                if (!isReleased) {
+                    console.log(`[Cooldown Server] Sinyal ${pairSymbol} ditahan: Masih dalam candle yang sama & harga belum rilis.`);
+                    return { status: 'NO_SIGNAL' };
+                } else {
+                    backendLastSignalRecord[stratContextKey] = {
+                        candleTime: currentCandleTime,
+                        price: currentPrice,
+                        snapshotAtr: currentAtr
+                    };
+                    return signalResult;
+                }
+            } else {
+                backendLastSignalRecord[stratContextKey] = {
+                    candleTime: currentCandleTime,
+                    price: currentPrice,
+                    snapshotAtr: currentAtr
+                };
+                return signalResult;
+            }
+        }
+
         return signalResult;
 
     } catch (e) {
