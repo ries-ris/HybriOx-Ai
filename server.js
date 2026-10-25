@@ -157,15 +157,85 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
     }
 }
 
-// MODIFIKASI: Gate 4 Risk Management (Kalkulasi Risiko Berbasis Struktur/ATR) di Backend
+// ============================================================================
+// MESIN INSTITUSIONAL ISLMS-200 & GATE 4 RISK MANAGEMENT (DI BACKEND)
+// ============================================================================
 function evaluateSmartMoneyConcepts(candles, pair, tf) {
-    if (!candles || candles.length < 20) return { status: 'NO_SIGNAL' };
-    
-    let lastC = candles[candles.length - 1];
-    let currentPrice = lastC[4];
-    let isBuy = lastC[4] > lastC[1];
-    
-    // Hitung ATR sederhana dari data candle
+    if (!candles || candles.length < 35) return { status: 'NO_SIGNAL' };
+
+    let currentPrice = candles[candles.length - 1][4];
+
+    // 1. Kalkulasi Dealing Range (Premium vs Discount & Equilibrium)
+    let sampleRange = candles.slice(-50);
+    let rangeHigh = Math.max(...sampleRange.map(c => c[2]));
+    let rangeLow = Math.min(...sampleRange.map(c => c[3]));
+    let equilibrium = (rangeHigh + rangeLow) / 2;
+
+    // 2. Deteksi Fair Value Gap (FVG) Institusional
+    let fvgs = [];
+    for (let i = 2; i < candles.length; i++) {
+        let prevCandle = candles[i - 2]; // Candle 1
+        let currCandle = candles[i];     // Candle 3
+
+        // Bullish FVG (Imbalance dorongan ke atas)
+        if (currCandle[3] > prevCandle[2]) {
+            fvgs.push({
+                type: 'BULLISH_FVG',
+                zoneLow: prevCandle[2],
+                zoneHigh: currCandle[3]
+            });
+        }
+        // Bearish FVG (Imbalance dorongan ke bawah)
+        if (currCandle[2] < prevCandle[3]) {
+            fvgs.push({
+                type: 'BEARISH_FVG',
+                zoneLow: currCandle[2],
+                zoneHigh: currCandle[3]
+            });
+        }
+    }
+
+    let actionType = null;
+    let strategyReason = "";
+
+    if (fvgs.length > 0) {
+        let latestFVG = fvgs[fvgs.length - 1];
+
+        // Konfluensi Buy: Harga di bawah Equilibrium (Discount Zone) dan menyentuh Bullish FVG
+        if (currentPrice < equilibrium && latestFVG.type === 'BULLISH_FVG') {
+            if (currentPrice >= latestFVG.zoneLow && currentPrice <= latestFVG.zoneHigh * 1.005) {
+                actionType = 'BUY_LIMIT';
+                strategyReason = 'ISLMS-200: Discount Zone Accumulation + Bullish FVG Confluence';
+            }
+        }
+
+        // Konfluensi Sell: Harga di atas Equilibrium (Premium Zone) dan menyentuh Bearish FVG
+        if (currentPrice > equilibrium && latestFVG.type === 'BEARISH_FVG') {
+            if (currentPrice <= latestFVG.zoneHigh && currentPrice >= latestFVG.zoneLow * 0.995) {
+                actionType = 'SELL_LIMIT';
+                strategyReason = 'ISLMS-200: Premium Zone Distribution + Bearish FVG Confluence';
+            }
+        }
+    }
+
+    // Fallback pemicu jika belum menyentuh FVG persis tapi struktur valid
+    if (!actionType) {
+        let lastC = candles[candles.length - 1];
+        let isBullishMomentum = lastC[4] > lastC[1];
+        if (currentPrice < equilibrium && isBullishMomentum) {
+            actionType = 'BUY_MARKET';
+            strategyReason = 'ISLMS-200: Institutional Discount Momentum Fallback';
+        } else if (currentPrice > equilibrium && !isBullishMomentum) {
+            actionType = 'SELL_MARKET';
+            strategyReason = 'ISLMS-200: Institutional Premium Momentum Fallback';
+        } else {
+            return { status: 'NO_SIGNAL' };
+        }
+    }
+
+    let isBuy = actionType.includes('BUY');
+
+    // 3. Gate 4 Risk Management (Kalkulasi ATR, SL, dan Multi-TP Presisi)
     let trList = [];
     for (let i = 1; i < candles.length; i++) {
         let high = candles[i][2], low = candles[i][3], prevClose = candles[i - 1][4];
@@ -174,14 +244,13 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
     let atr = trList.slice(-14).reduce((a, b) => a + b, 0) / 14 || (currentPrice * 0.001);
     let buffer = atr * 0.25;
 
-    // Tentukan Stop Loss (SL) berdasarkan struktur low/high terdekat + buffer
-    let sample = candles.slice(-30);
+    let sampleStructure = candles.slice(-30);
     let sl;
     if (isBuy) {
-        let localLow = Math.min(...sample.map(c => c[3]));
+        let localLow = Math.min(...sampleStructure.map(c => c[3]));
         sl = localLow - buffer;
     } else {
-        let localHigh = Math.max(...sample.map(c => c[2]));
+        let localHigh = Math.max(...sampleStructure.map(c => c[2]));
         sl = localHigh + buffer;
     }
 
@@ -191,18 +260,18 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
         sl = isBuy ? currentPrice - slDistance : currentPrice + slDistance;
     }
 
-    // Kalkulasi Target Profit (Multi-TP / Gate 4)
+    // Kalkulasi Target Profit Berlapis (Multi-TP / Gate 4)
     let tp1 = Number((isBuy ? currentPrice + (slDistance * 1.2) : currentPrice - (slDistance * 1.2)).toFixed(4));
     let tp2 = Number((isBuy ? currentPrice + (slDistance * 2.0) : currentPrice - (slDistance * 2.0)).toFixed(4));
     let tp3 = Number((isBuy ? currentPrice + (slDistance * 3.0) : currentPrice - (slDistance * 3.0)).toFixed(4));
 
     return {
-        signalId: 'INST_GATE4_' + pair + '_TF' + tf + '_' + Date.now(),
+        signalId: 'INST_ISLMS200_' + pair + '_TF' + tf + '_' + Date.now(),
         pair: pair,
         timeframe: tf,
         status: 'TRIGGERED',
-        strategyName: 'Autonomous WS (Bypass Strategy -> Gate 4)',
-        actionType: isBuy ? 'BUY_MARKET' : 'SELL_MARKET',
+        strategyName: strategyReason,
+        actionType: actionType,
         price: Number(currentPrice.toFixed(4)),
         entryZone: Number(currentPrice.toFixed(4)),
         sl: Number(sl.toFixed(4)),
@@ -378,7 +447,7 @@ wss.on('connection', (ws) => {
             if (parsed.action === 'FORCE_TRIGGER_SCAN' || parsed.type === 'FORCE_TRIGGER_SCAN') {
                 console.log('[Backend] Force Trigger dieksekusi otonom!');
                 let signal = await runInstitutionalEnginePipeline("XAUUSD", "15");
-                if (signal) {
+                if (signal && signal.status === 'TRIGGERED') {
                     let routedSignal = routeSignalThroughTierPipeline(signal, ws.tier);
                     if (routedSignal && routedSignal.allowed) {
                         ws.send(JSON.stringify({
@@ -462,7 +531,7 @@ setInterval(async () => {
             if (inNewsBlackout) {
                 console.log(`[News Guard] Sinyal ${targetSymbol} ditahan (Blackout News aktif). Data tetap direkam untuk Learning.`);
             } else {
-                console.log(`[Autonomous Engine] Sinyal Gate 4 Valid! Menyiarkan sinyal ${targetSymbol} via WebSocket dengan filter Tier.`);
+                console.log(`[Autonomous Engine] Sinyal ISLMS-200 & Gate 4 Valid! Menyiarkan sinyal ${targetSymbol} via WebSocket dengan filter Tier.`);
                 
                 // Broadcast ke setiap klien yang terhubung sesuai TIER masing-masing
                 wss.clients.forEach(client => {
