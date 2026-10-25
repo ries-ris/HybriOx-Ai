@@ -3,7 +3,7 @@
  * - Full Multi-Provider Support (Twelve Data, Binance, Alpha Vantage / Fallbacks)
  * - Strict Master Registry Whitelist (25 Authorized Instruments)
  * - XAUUSDInstitutionalEngine (ISLMS-200) & Session-Aware Autonomous Scheduler
- * - Tier Distribution Pipeline & WebSocket Integration
+ * - Raw WebSocket Signal Broadcasting & Enterprise Asset Management
  * - ES Module Syntax (Compatible with package.json "type": "module")
  */
 
@@ -157,7 +157,7 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
     }
 }
 
-// MODIFIKASI: Gate 4 Risk Management (Kalkulasi Risiko Berbasis Struktur/ATR) di Backend
+// Gate 4 Risk Management (Kalkulasi Risiko Berbasis Struktur/ATR) di Backend
 function evaluateSmartMoneyConcepts(candles, pair, tf) {
     if (!candles || candles.length < 20) return { status: 'NO_SIGNAL' };
     
@@ -335,57 +335,25 @@ app.post('/api/sync', (req, res) => {
 });
 
 // ============================================================================
-// 5. JALUR DISTRIBUSI SINYAL BERBASIS TIER (PIPELINE)
-// ============================================================================
-function routeSignalThroughTierPipeline(signalData, clientTier) {
-    if (clientTier === 'free' || !clientTier) {
-        return {
-            ...signalData,
-            tierTarget: 'STANDARD',
-            allowed: true,
-            note: 'Dialirkan ke jalur Standar Tier'
-        };
-    } 
-    else if (clientTier === 'premium' || clientTier === 'vip') {
-        return {
-            ...signalData,
-            tierTarget: 'PREMIUM',
-            allowed: true,
-            note: 'Dialirkan ke jalur Premium Tier (Full Access)'
-        };
-    }
-    return null;
-}
-
-// ============================================================================
-// 6. WEBSOCKET SERVER & PUSAT KENDALI KELAS ENTERPRISE (DECENTRALIZED)
+// 5. WEBSOCKET SERVER & RAW BROADCAST PUSAT KENDALI ENTERPRISE
 // ============================================================================
 wss.on('connection', (ws) => {
     console.log('[WebSocket Backend] Klien Panel Developer terhubung secara aktif.');
-    ws.tier = 'free'; // Default tier klien
 
     ws.on('message', async (message) => {
         try {
             const parsed = JSON.parse(message);
             console.log(`[WebSocket Backend] Menerima aksi kendali: ${parsed.action || parsed.type}`);
 
-            // Tangkap pengaturan tier jika dikirimkan oleh klien
-            if (parsed.tier) {
-                ws.tier = parsed.tier;
-                console.log(`[WebSocket Backend] Klien mendaftarkan tier: ${ws.tier}`);
-            }
-
             if (parsed.action === 'FORCE_TRIGGER_SCAN' || parsed.type === 'FORCE_TRIGGER_SCAN') {
                 console.log('[Backend] Force Trigger dieksekusi otonom!');
                 let signal = await runInstitutionalEnginePipeline("XAUUSD", "15");
                 if (signal) {
-                    let routedSignal = routeSignalThroughTierPipeline(signal, ws.tier);
-                    if (routedSignal && routedSignal.allowed) {
-                        ws.send(JSON.stringify({
-                            type: 'DECENTRALIZED_SIGNAL_BROADCAST',
-                            signal: routedSignal
-                        }));
-                    }
+                    // Kirim sinyal mentah/utuh tanpa filter tier di server
+                    ws.send(JSON.stringify({
+                        type: 'DECENTRALIZED_SIGNAL_BROADCAST',
+                        signal: signal
+                    }));
                 }
             } 
             else if (parsed.action === 'EMERGENCY_STOP' || parsed.type === 'EMERGENCY_STOP') {
@@ -410,7 +378,7 @@ wss.on('connection', (ws) => {
 });
 
 // ============================================================================
-// 7. AUTONOMOUS BACKGROUND SCHEDULER & WORKER (INTERVAL 5 DETIK)
+// 6. AUTONOMOUS BACKGROUND SCHEDULER & WORKER (INTERVAL 5 DETIK)
 // ============================================================================
 function isWeekend() {
     const now = new Date();
@@ -435,26 +403,18 @@ function isWithinSessionRange() {
 
 function isHighImpactNewsBlackout() {
     if (!BackendState.econCalendarFilterActive) return false;
-    // Logika jeda 15 menit sebelum/sesudah berita high-impact
     return false; 
 }
 
-const AUTONOMOUS_INTERVAL_MS = 5000; // Interval 5 detik untuk Autonomous Learning
+const AUTONOMOUS_INTERVAL_MS = 5000;
 
 setInterval(async () => {
-    // 1. Validasi Emergency Stop
     if (!BackendState.isRunning) return;
-
-    // 2. Weekend Guard (Pasar tutup Sabtu-Minggu -> Berhenti total demi kuota)
     if (isWeekend()) return;
-
-    // 3. Session Guard (Hanya aktif di dalam rentang jam sesi)
     if (!isWithinSessionRange()) return;
 
     try {
         let targetSymbol = "XAUUSD";
-        
-        // Pengambilan data & analisis berjalan tiap 5 detik untuk Autonomous Learning
         let signalResult = await runInstitutionalEnginePipeline(targetSymbol, "15");
         let inNewsBlackout = isHighImpactNewsBlackout();
 
@@ -462,20 +422,15 @@ setInterval(async () => {
             if (inNewsBlackout) {
                 console.log(`[News Guard] Sinyal ${targetSymbol} ditahan (Blackout News aktif). Data tetap direkam untuk Learning.`);
             } else {
-                console.log(`[Autonomous Engine] Sinyal Gate 4 Valid! Menyiarkan sinyal ${targetSymbol} via WebSocket dengan filter Tier.`);
+                console.log(`[Autonomous Engine] Menyiarkan sinyal utuh ${targetSymbol} via WebSocket ke seluruh klien.`);
                 
-                // Broadcast ke setiap klien yang terhubung sesuai TIER masing-masing
+                // Broadcast sinyal mentah/utuh ke semua klien WebSocket yang terhubung
                 wss.clients.forEach(client => {
                     if (client.readyState === WebSocket.OPEN) {
-                        let userTier = client.tier || 'free';
-                        let routedSignal = routeSignalThroughTierPipeline(signalResult, userTier);
-
-                        if (routedSignal && routedSignal.allowed) {
-                            client.send(JSON.stringify({
-                                type: 'DECENTRALIZED_SIGNAL_BROADCAST',
-                                signal: routedSignal
-                            }));
-                        }
+                        client.send(JSON.stringify({
+                            type: 'DECENTRALIZED_SIGNAL_BROADCAST',
+                            signal: signalResult
+                        }));
                     }
                 });
             }
