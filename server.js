@@ -642,7 +642,7 @@ function isHighImpactNewsBlackout() {
     return false; 
 }
 
-const AUTONOMOUS_INTERVAL_MS = 5000;
+const AUTONOMOUS_INTERVAL_MS = 225000;
 
 setInterval(async () => {
     if (!BackendState.isRunning) return;
