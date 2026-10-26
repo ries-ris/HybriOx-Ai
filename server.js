@@ -1,6 +1,6 @@
 /**
  * HybriOX Professional-Grade Backend Proxy & Asset Management Server
- * - Full Multi-Provider Support (Twelve Data, Binance, Alpha Vantage / Fallbacks)
+ * - Full Multi-Provider Support (Twelve Data, Finnhub, Alpha Vantage / Fallbacks)
  * - Strict Master Registry Whitelist (25 Authorized Instruments)
  * - XAUUSDInstitutionalEngine (ISLMS-200) & Session-Aware Autonomous Scheduler
  * - Tier Distribution Pipeline & WebSocket Integration
@@ -99,7 +99,8 @@ loadGlobalConfigFromFirebase();
 const PROVIDERS = {
     twelveData: { baseUrl: "https://api.twelvedata.com" },
     binance: { baseUrl: "https://api.binance.com/api/v3" },
-    alphaVantage: { baseUrl: "https://www.alphavantage.co/query" }
+    alphaVantage: { baseUrl: "https://www.alphavantage.co/query" },
+    finnhub: { baseUrl: "https://finnhub.io/api/v1" }
 };
 
 const marketCache = new Map();
@@ -151,17 +152,14 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
             ];
         }
 
-        // Jalankan evaluasi ISLMS-200 & Gate 4
         let signalResult = evaluateSmartMoneyConcepts(candles, pairSymbol, timeframe);
 
-        // Validasi Cooldown & Release Threshold Berbasis ATR
         if (signalResult && signalResult.status === 'TRIGGERED') {
             let currentCandleTime = candles[candles.length - 1][0];
             let currentPrice = candles[candles.length - 1][4];
             let stratContextKey = `${pairSymbol}_${timeframe}_strat_islms_200`;
             let lastStratRecord = backendLastSignalRecord[stratContextKey];
 
-            // Kalkulasi ATR untuk acuan baseline release
             let trList = [];
             for (let i = 1; i < candles.length; i++) {
                 let high = candles[i][2], low = candles[i][3], prevClose = candles[i - 1][4];
@@ -174,7 +172,6 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
                 let isReleased = Math.abs(currentPrice - lastStratRecord.price) >= (baselineAtr * 0.5);
                 
                 if (!isReleased) {
-                    console.log(`[Cooldown Server] Sinyal ${pairSymbol} ditahan: Masih dalam candle yang sama & harga belum rilis.`);
                     return { status: 'NO_SIGNAL' };
                 } else {
                     backendLastSignalRecord[stratContextKey] = {
@@ -210,19 +207,16 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
 
     let currentPrice = candles[candles.length - 1][4];
 
-    // 1. Kalkulasi Dealing Range (Premium vs Discount & Equilibrium)
     let sampleRange = candles.slice(-50);
     let rangeHigh = Math.max(...sampleRange.map(c => c[2]));
     let rangeLow = Math.min(...sampleRange.map(c => c[3]));
     let equilibrium = (rangeHigh + rangeLow) / 2;
 
-    // 2. Deteksi Fair Value Gap (FVG) Institusional
     let fvgs = [];
     for (let i = 2; i < candles.length; i++) {
-        let prevCandle = candles[i - 2]; // Candle 1
-        let currCandle = candles[i];     // Candle 3
+        let prevCandle = candles[i - 2];
+        let currCandle = candles[i];
 
-        // Bullish FVG (Imbalance dorongan ke atas)
         if (currCandle[3] > prevCandle[2]) {
             fvgs.push({
                 type: 'BULLISH_FVG',
@@ -230,7 +224,6 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
                 zoneHigh: currCandle[3]
             });
         }
-        // Bearish FVG (Imbalance dorongan ke bawah)
         if (currCandle[2] < prevCandle[3]) {
             fvgs.push({
                 type: 'BEARISH_FVG',
@@ -246,7 +239,6 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
     if (fvgs.length > 0) {
         let latestFVG = fvgs[fvgs.length - 1];
 
-        // Konfluensi Buy: Harga di bawah Equilibrium (Discount Zone) dan menyentuh Bullish FVG
         if (currentPrice < equilibrium && latestFVG.type === 'BULLISH_FVG') {
             if (currentPrice >= latestFVG.zoneLow && currentPrice <= latestFVG.zoneHigh * 1.005) {
                 actionType = 'BUY_LIMIT';
@@ -254,7 +246,6 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
             }
         }
 
-        // Konfluensi Sell: Harga di atas Equilibrium (Premium Zone) dan menyentuh Bearish FVG
         if (currentPrice > equilibrium && latestFVG.type === 'BEARISH_FVG') {
             if (currentPrice <= latestFVG.zoneHigh && currentPrice >= latestFVG.zoneLow * 0.995) {
                 actionType = 'SELL_LIMIT';
@@ -263,7 +254,6 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
         }
     }
 
-    // Fallback pemicu jika belum menyentuh FVG persis tapi struktur valid
     if (!actionType) {
         let lastC = candles[candles.length - 1];
         let isBullishMomentum = lastC[4] > lastC[1];
@@ -280,7 +270,6 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
 
     let isBuy = actionType.includes('BUY');
 
-    // 3. Gate 4 Risk Management (Kalkulasi ATR, SL, dan Multi-TP Presisi)
     let trList = [];
     for (let i = 1; i < candles.length; i++) {
         let high = candles[i][2], low = candles[i][3], prevClose = candles[i - 1][4];
@@ -305,7 +294,6 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
         sl = isBuy ? currentPrice - slDistance : currentPrice + slDistance;
     }
 
-    // Kalkulasi Target Profit Berlapis (Multi-TP / Gate 4)
     let tp1 = Number((isBuy ? currentPrice + (slDistance * 1.2) : currentPrice - (slDistance * 1.2)).toFixed(4));
     let tp2 = Number((isBuy ? currentPrice + (slDistance * 2.0) : currentPrice - (slDistance * 2.0)).toFixed(4));
     let tp3 = Number((isBuy ? currentPrice + (slDistance * 3.0) : currentPrice - (slDistance * 3.0)).toFixed(4));
@@ -332,7 +320,7 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
 }
 
 // ============================================================================
-// 4. REST API ENDPOINTS
+// 4. REST API ENDPOINTS (TERMASUK PROXY CANDLES UNTUK MULTI-PROVIDER)
 // ============================================================================
 app.get('/api/macro/latest', async (req, res) => {
     try {
@@ -395,6 +383,95 @@ app.post('/api/validate-symbol', (req, res) => {
         return res.json({ valid: true, symbol: cleanSymbol });
     }
     return res.status(400).json({ valid: false, message: `Instrumen '${cleanSymbol}' ditolak whitelist.` });
+});
+
+// Endpoint Proxy Candles yang diminta oleh frontend
+app.get('/api/proxy/candles', async (req, res) => {
+    try {
+        const { 
+            provider = 'twelvedata', 
+            symbol, 
+            tf, 
+            interval, 
+            finnhubSymbol, 
+            resolution, 
+            from, 
+            to, 
+            isForex, 
+            isDaily, 
+            base, 
+            quote 
+        } = req.query;
+
+        const cleanSymbol = (symbol || "").trim().toUpperCase();
+
+        if (provider === 'twelvedata') {
+            const apiKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo";
+            const t12Interval = interval || '15min';
+            const formattedSym = formatSymbolForProvider(cleanSymbol, 'twelveData');
+            const targetUrl = `${PROVIDERS.twelveData.baseUrl}/time_series?symbol=${encodeURIComponent(formattedSym)}&interval=${t12Interval}&outputsize=200&apikey=${apiKey}`;
+            
+            const response = await axios.get(targetUrl);
+            const data = response.data;
+
+            if (data && (data.code === 400 || data.status === 'error')) {
+                const errMessage = (data.message || "").toLowerCase();
+                if (errMessage.includes('symbol not found') || errMessage.includes('does not exist') || errMessage.includes('not supported')) {
+                    return res.json({ success: false, isInvalidSymbol: true, message: data.message });
+                }
+            }
+            return res.json(data);
+
+        } else if (provider === 'finnhub') {
+            const apiKey = runtimeConfig.finnhubKey || process.env.FINNHUB_KEY || "c8888888888888888888";
+            const isFx = isForex === 'true';
+            let targetUrl = '';
+
+            if (isFx) {
+                targetUrl = `${PROVIDERS.finnhub.baseUrl}/forex/candle?symbol=OANDA:${finnhubSymbol || cleanSymbol}&resolution=${resolution || '15'}&from=${from}&to=${to}&token=${apiKey}`;
+            } else {
+                targetUrl = `${PROVIDERS.finnhub.baseUrl}/stock/candle?symbol=${cleanSymbol}&resolution=${resolution || '15'}&from=${from}&to=${to}&token=${apiKey}`;
+            }
+
+            const response = await axios.get(targetUrl);
+            const data = response.data;
+
+            if (data && data.s === 'no_data') {
+                return res.json({ success: false, isInvalidSymbol: true, message: "No data from Finnhub" });
+            }
+            return res.json(data);
+
+        } else if (provider === 'alphavantage') {
+            const apiKey = runtimeConfig.alphaVantageKey || process.env.ALPHA_VANTAGE_KEY || "demo";
+            const isFx = isForex === 'true';
+            const daily = isDaily === 'true';
+            let targetUrl = '';
+
+            if (isFx) {
+                targetUrl = daily
+                    ? `${PROVIDERS.alphaVantage.baseUrl}?function=FX_DAILY&from_symbol=${base}&to_symbol=${quote}&outputsize=full&apikey=${apiKey}`
+                    : `${PROVIDERS.alphaVantage.baseUrl}?function=FX_INTRADAY&from_symbol=${base}&to_symbol=${quote}&interval=${interval || '15min'}&outputsize=full&apikey=${apiKey}`;
+            } else {
+                targetUrl = daily
+                    ? `${PROVIDERS.alphaVantage.baseUrl}?function=TIME_SERIES_DAILY&symbol=${cleanSymbol}&outputsize=full&apikey=${apiKey}`
+                    : `${PROVIDERS.alphaVantage.baseUrl}?function=TIME_SERIES_INTRADAY&symbol=${cleanSymbol}&interval=${interval || '15min'}&outputsize=full&apikey=${apiKey}`;
+            }
+
+            const response = await axios.get(targetUrl);
+            const data = response.data;
+
+            if (data && (data['Error Message'] || data['Note'])) {
+                return res.json({ success: false, isInvalidSymbol: true, message: "Alpha Vantage limit or invalid symbol" });
+            }
+            return res.json(data);
+
+        } else {
+            return res.status(400).json({ success: false, message: "Provider proxy tidak dikenal" });
+        }
+
+    } catch (error) {
+        return res.status(500).json({ success: false, isInvalidSymbol: false, message: error.message });
+    }
 });
 
 app.get('/api/v1/market', async (req, res) => {
@@ -476,14 +553,13 @@ function routeSignalThroughTierPipeline(signalData, clientTier) {
 // ============================================================================
 wss.on('connection', (ws) => {
     console.log('[WebSocket Backend] Klien Panel Developer terhubung secara aktif.');
-    ws.tier = 'free'; // Default tier klien
+    ws.tier = 'free';
 
     ws.on('message', async (message) => {
         try {
             const parsed = JSON.parse(message);
             console.log(`[WebSocket Backend] Menerima aksi kendali: ${parsed.action || parsed.type}`);
 
-            // Tangkap pengaturan tier jika dikirimkan oleh klien
             if (parsed.tier) {
                 ws.tier = parsed.tier;
                 console.log(`[WebSocket Backend] Klien mendaftarkan tier: ${ws.tier}`);
@@ -528,7 +604,7 @@ wss.on('connection', (ws) => {
 // ============================================================================
 function isWeekend() {
     const now = new Date();
-    const day = now.getDay(); // 0 = Minggu, 6 = Sabtu
+    const day = now.getDay();
     return (day === 0 || day === 6);
 }
 
@@ -549,36 +625,27 @@ function isWithinSessionRange() {
 
 function isHighImpactNewsBlackout() {
     if (!BackendState.econCalendarFilterActive) return false;
-    // Logika jeda 15 menit sebelum/sesudah berita high-impact
     return false; 
 }
 
-const AUTONOMOUS_INTERVAL_MS = 5000; // Interval 5 detik untuk Autonomous Learning
+const AUTONOMOUS_INTERVAL_MS = 5000;
 
 setInterval(async () => {
-    // 1. Validasi Emergency Stop
     if (!BackendState.isRunning) return;
-
-    // 2. Weekend Guard (Pasar tutup Sabtu-Minggu -> Berhenti total demi kuota)
     if (isWeekend()) return;
-
-    // 3. Session Guard (Hanya aktif di dalam rentang jam sesi)
     if (!isWithinSessionRange()) return;
 
     try {
         let targetSymbol = "XAUUSD";
-        
-        // Pengambilan data & analisis berjalan tiap 5 detik untuk Autonomous Learning
         let signalResult = await runInstitutionalEnginePipeline(targetSymbol, "15");
         let inNewsBlackout = isHighImpactNewsBlackout();
 
         if (signalResult && signalResult.status === 'TRIGGERED') {
             if (inNewsBlackout) {
-                console.log(`[News Guard] Sinyal ${targetSymbol} ditahan (Blackout News aktif). Data tetap direkam untuk Learning.`);
+                console.log(`[News Guard] Sinyal ${targetSymbol} ditahan (Blackout News aktif).`);
             } else {
-                console.log(`[Autonomous Engine] Sinyal ISLMS-200 & Gate 4 Valid! Menyiarkan sinyal ${targetSymbol} via WebSocket dengan filter Tier.`);
+                console.log(`[Autonomous Engine] Sinyal ISLMS-200 & Gate 4 Valid! Menyiarkan sinyal ${targetSymbol} via WebSocket.`);
                 
-                // Broadcast ke setiap klien yang terhubung sesuai TIER masing-masing
                 wss.clients.forEach(client => {
                     if (client.readyState === WebSocket.OPEN) {
                         let userTier = client.tier || 'free';
