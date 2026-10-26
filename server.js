@@ -346,28 +346,42 @@ app.post('/api/verify-dev', (req, res) => {
 app.post('/api/developer/config', async (req, res) => {
     try {
         const { twelveApiKey, finnhubKey, alphaVantageKey, geminiApiKey, tier } = req.body;
-        if (twelveApiKey !== undefined) runtimeConfig.twelveApiKey = twelveApiKey.trim();
-        if (finnhubKey !== undefined) runtimeConfig.finnhubKey = finnhubKey.trim();
-        if (alphaVantageKey !== undefined) runtimeConfig.alphaVantageKey = alphaVantageKey.trim();
-        if (geminiApiKey !== undefined) runtimeConfig.geminiApiKey = geminiApiKey.trim();
-        if (tier !== undefined) runtimeConfig.tier = tier;
+        
+        let firestoreUpdate = { updatedAt: new Date().toISOString() };
 
-        if (db) {
-            await db.collection('settings').doc('global_config').set({
-                twelveApiKey: runtimeConfig.twelveApiKey,
-                finnhubKey: runtimeConfig.finnhubKey,
-                alphaVantageKey: runtimeConfig.alphaVantageKey,
-                geminiApiKey: runtimeConfig.geminiApiKey,
-                tier: runtimeConfig.tier,
-                updatedAt: new Date().toISOString()
-            }, { merge: true });
+        // Hanya perbarui jika nilainya ada dan tidak kosong
+        if (twelveApiKey !== undefined && twelveApiKey.trim() !== '') {
+            runtimeConfig.twelveApiKey = twelveApiKey.trim();
+            firestoreUpdate.twelveApiKey = twelveApiKey.trim();
+        }
+        if (finnhubKey !== undefined && finnhubKey.trim() !== '') {
+            runtimeConfig.finnhubKey = finnhubKey.trim();
+            firestoreUpdate.finnhubKey = finnhubKey.trim();
+        }
+        if (alphaVantageKey !== undefined && alphaVantageKey.trim() !== '') {
+            runtimeConfig.alphaVantageKey = alphaVantageKey.trim();
+            firestoreUpdate.alphaVantageKey = alphaVantageKey.trim();
+        }
+        if (geminiApiKey !== undefined && geminiApiKey.trim() !== '') {
+            runtimeConfig.geminiApiKey = geminiApiKey.trim();
+            firestoreUpdate.geminiApiKey = geminiApiKey.trim();
+        }
+        if (tier !== undefined) {
+            runtimeConfig.tier = tier;
+            firestoreUpdate.tier = tier;
         }
 
-        return res.json({ success: true, message: "Konfigurasi diperbarui!" });
+        if (db) {
+            // Menggunakan { merge: true } agar key lain yang tidak dikirim tidak ikut terhapus
+            await db.collection('settings').doc('global_config').set(firestoreUpdate, { merge: true });
+        }
+
+        return res.json({ success: true, message: "Konfigurasi diperbarui dengan aman!" });
     } catch (error) {
         return res.status(500).json({ success: false, error: error.message });
     }
 });
+
 
 app.get('/api/symbols/search', (req, res) => {
     const q = (req.query.q || '').trim().toUpperCase();
