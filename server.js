@@ -117,6 +117,24 @@ function formatSymbolForProvider(cleanSymbol, provider) {
     return cleanSymbol;
 }
 
+// Helper untuk Mengambil Cache Makro M30 dari Firestore atau Memory Cache Lokal
+async function getMacroCache400(pairSymbol) {
+    try {
+        if (db) {
+            let docSnap = await db.collection('macro_cache').doc(pairSymbol.toUpperCase()).get();
+            if (docSnap.exists) {
+                let data = docSnap.data();
+                if (Array.isArray(data.candles) && data.candles.length > 0) {
+                    return data.candles.slice(-400);
+                }
+            }
+        }
+    } catch (e) {
+        console.log(`[Macro Cache Warning] Gagal memuat cache Firestore untuk ${pairSymbol}:`, e.message);
+    }
+    return [];
+}
+
 // ============================================================================
 // 3. MESIN INSTITUSIONAL: XAUUSDInstitutionalEngine (ISLMS-200) & PIPELINE
 // ============================================================================
@@ -126,43 +144,47 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
         return null;
     }
 
-    console.log(`[Engine ISLMS-200] Menjalankan analisis Smart Money Concepts untuk ${pairSymbol} (TF: M${timeframe})...`);
+    console.log(`[Engine ISLMS-200] Menjalankan analisis Smart Money Concepts (200 M15 + 400 M30) untuk ${pairSymbol}...`);
 
     try {
         let activeKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo";
         let formattedSym = formatSymbolForProvider(pairSymbol, 'twelveData');
-        let intervalMap = { '1': '1min', '5': '5min', '15': '15min', '60': '1h' };
-        let t12Interval = intervalMap[timeframe] || '15min';
 
-        let url = `${PROVIDERS.twelveData.baseUrl}/time_series?symbol=${formattedSym}&interval=${t12Interval}&outputsize=50&apikey=${activeKey}`;
-        let response = await axios.get(url);
+        // 1. Tarik 200 candle M15 untuk data taktis
+        let urlM15 = `${PROVIDERS.twelveData.baseUrl}/time_series?symbol=${formattedSym}&interval=15min&outputsize=200&apikey=${activeKey}`;
+        let resM15 = await axios.get(urlM15);
         
-        let candles = [];
-        if (response.data && response.data.values && Array.isArray(response.data.values)) {
-            candles = response.data.values.reverse().map(item => [
+        let m15Candles = [];
+        if (resM15.data && resM15.data.values && Array.isArray(resM15.data.values)) {
+            m15Candles = resM15.data.values.reverse().map(item => [
                 new Date(item.datetime).getTime(),
                 parseFloat(item.open), parseFloat(item.high), parseFloat(item.low), parseFloat(item.close), parseFloat(item.volume || 100)
             ]);
         }
 
-        if (candles.length === 0) {
-            candles = [
+        // 2. Ambil 400 candle M30 makro secara serentak
+        let m30MacroCandles = await getMacroCache400(pairSymbol);
+
+        if (m15Candles.length < 50) {
+            // Fallback darurat jika API terbatas
+            m15Candles = [
                 [Date.now() - 900000, 2650.0, 2655.0, 2648.0, 2652.5, 1000],
                 [Date.now(), 2652.5, 2658.0, 2651.0, 2657.0, 1200]
             ];
         }
 
-        let signalResult = evaluateSmartMoneyConcepts(candles, pairSymbol, timeframe);
+        // 3. Masukkan ke Mesin ISLMS-200 dengan struktur SNR Ganda
+        let signalResult = evaluateSmartMoneyConcepts(m15Candles, m30MacroCandles, pairSymbol, timeframe);
 
         if (signalResult && signalResult.status === 'TRIGGERED') {
-            let currentCandleTime = candles[candles.length - 1][0];
-            let currentPrice = candles[candles.length - 1][4];
+            let currentCandleTime = m15Candles[m15Candles.length - 1][0];
+            let currentPrice = m15Candles[m15Candles.length - 1][4];
             let stratContextKey = `${pairSymbol}_${timeframe}_strat_islms_200`;
             let lastStratRecord = backendLastSignalRecord[stratContextKey];
 
             let trList = [];
-            for (let i = 1; i < candles.length; i++) {
-                let high = candles[i][2], low = candles[i][3], prevClose = candles[i - 1][4];
+            for (let i = 1; i < m15Candles.length; i++) {
+                let high = m15Candles[i][2], low = m15Candles[i][3], prevClose = m15Candles[i - 1][4];
                 trList.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
             }
             let currentAtr = trList.slice(-14).reduce((a, b) => a + b, 0) / 14 || (currentPrice * 0.001);
@@ -173,22 +195,15 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
                 
                 if (!isReleased) {
                     return { status: 'NO_SIGNAL' };
-                } else {
-                    backendLastSignalRecord[stratContextKey] = {
-                        candleTime: currentCandleTime,
-                        price: currentPrice,
-                        snapshotAtr: currentAtr
-                    };
-                    return signalResult;
                 }
-            } else {
-                backendLastSignalRecord[stratContextKey] = {
-                    candleTime: currentCandleTime,
-                    price: currentPrice,
-                    snapshotAtr: currentAtr
-                };
-                return signalResult;
             }
+
+            backendLastSignalRecord[stratContextKey] = {
+                candleTime: currentCandleTime,
+                price: currentPrice,
+                snapshotAtr: currentAtr
+            };
+            return signalResult;
         }
 
         return signalResult;
@@ -200,36 +215,32 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
 }
 
 // ============================================================================
-// MESIN INSTITUSIONAL ISLMS-200 & GATE 4 RISK MANAGEMENT (DI BACKEND)
+// MESIN INSTITUSIONAL ISLMS-200 & GATE 4 RISK MANAGEMENT (SNR + ATURAN 18 PIP)
 // ============================================================================
-function evaluateSmartMoneyConcepts(candles, pair, tf) {
-    if (!candles || candles.length < 35) return { status: 'NO_SIGNAL' };
+function evaluateSmartMoneyConcepts(m15Candles, m30MacroCandles, pair, tf) {
+    if (!m15Candles || m15Candles.length < 50) return { status: 'NO_SIGNAL' };
 
-    let currentPrice = candles[candles.length - 1][4];
+    let currentPrice = m15Candles[m15Candles.length - 1][4];
 
-    let sampleRange = candles.slice(-50);
+    // Gabungkan data makro dan taktis untuk pemetaan SNR horizontal yang mendalam
+    let combinedCandles = m30MacroCandles.length >= 50 ? [...m30MacroCandles, ...m15Candles] : m15Candles;
+
+    let sampleRange = combinedCandles.slice(-200);
     let rangeHigh = Math.max(...sampleRange.map(c => c[2]));
     let rangeLow = Math.min(...sampleRange.map(c => c[3]));
     let equilibrium = (rangeHigh + rangeLow) / 2;
 
+    // Deteksi FVG (Fair Value Gap)
     let fvgs = [];
-    for (let i = 2; i < candles.length; i++) {
-        let prevCandle = candles[i - 2];
-        let currCandle = candles[i];
+    for (let i = 2; i < m15Candles.length; i++) {
+        let prevCandle = m15Candles[i - 2];
+        let currCandle = m15Candles[i];
 
         if (currCandle[3] > prevCandle[2]) {
-            fvgs.push({
-                type: 'BULLISH_FVG',
-                zoneLow: prevCandle[2],
-                zoneHigh: currCandle[3]
-            });
+            fvgs.push({ type: 'BULLISH_FVG', zoneLow: prevCandle[2], zoneHigh: currCandle[3] });
         }
         if (currCandle[2] < prevCandle[3]) {
-            fvgs.push({
-                type: 'BEARISH_FVG',
-                zoneLow: currCandle[2],
-                zoneHigh: currCandle[3]
-            });
+            fvgs.push({ type: 'BEARISH_FVG', zoneLow: currCandle[2], zoneHigh: currCandle[3] });
         }
     }
 
@@ -242,20 +253,20 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
         if (currentPrice < equilibrium && latestFVG.type === 'BULLISH_FVG') {
             if (currentPrice >= latestFVG.zoneLow && currentPrice <= latestFVG.zoneHigh * 1.005) {
                 actionType = 'BUY_LIMIT';
-                strategyReason = 'ISLMS-200: Discount Zone Accumulation + Bullish FVG Confluence';
+                strategyReason = 'ISlMS-200: 200 M15 + 400 M30 Discount Zone + Bullish FVG';
             }
         }
 
         if (currentPrice > equilibrium && latestFVG.type === 'BEARISH_FVG') {
             if (currentPrice <= latestFVG.zoneHigh && currentPrice >= latestFVG.zoneLow * 0.995) {
                 actionType = 'SELL_LIMIT';
-                strategyReason = 'ISLMS-200: Premium Zone Distribution + Bearish FVG Confluence';
+                strategyReason = 'ISLMS-200: 200 M15 + 400 M30 Premium Zone + Bearish FVG';
             }
         }
     }
 
     if (!actionType) {
-        let lastC = candles[candles.length - 1];
+        let lastC = m15Candles[m15Candles.length - 1];
         let isBullishMomentum = lastC[4] > lastC[1];
         if (currentPrice < equilibrium && isBullishMomentum) {
             actionType = 'BUY_MARKET';
@@ -270,33 +281,76 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
 
     let isBuy = actionType.includes('BUY');
 
+    // ========================================================================
+    // GATE 4: RISK MANAGEMENT & TPSL BERBASIS SNR MAYOR + ATURAN 18 PIP
+    // ========================================================================
+    let swingHighs = [];
+    let swingLows = [];
+    for (let i = 2; i < combinedCandles.length - 2; i++) {
+        let h = combinedCandles[i][2];
+        let l = combinedCandles[i][3];
+        if (h > combinedCandles[i-1][2] && h > combinedCandles[i+1][2]) swingHighs.push(h);
+        if (l < combinedCandles[i-1][3] && l < combinedCandles[i+1][3]) swingLows.push(l);
+    }
+
     let trList = [];
-    for (let i = 1; i < candles.length; i++) {
-        let high = candles[i][2], low = candles[i][3], prevClose = candles[i - 1][4];
+    for (let i = 1; i < m15Candles.length; i++) {
+        let high = m15Candles[i][2], low = m15Candles[i][3], prevClose = m15Candles[i - 1][4];
         trList.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
     }
     let atr = trList.slice(-14).reduce((a, b) => a + b, 0) / 14 || (currentPrice * 0.001);
-    let buffer = atr * 0.25;
+    
+    // Buffer pengaman agar lolos dari jilatan liquidity sweep
+    let buffer = isBuy ? (atr * 0.35) : (atr * 0.35);
+    let sl = 0;
+    let targetPrices = [];
 
-    let sampleStructure = candles.slice(-30);
-    let sl;
     if (isBuy) {
-        let localLow = Math.min(...sampleStructure.map(c => c[3]));
-        sl = localLow - buffer;
+        let validSupports = swingLows.filter(l => l < currentPrice);
+        let nearestSupport = validSupports.length > 0 ? Math.min(...validSupports) : (currentPrice - (atr * 1.5));
+        sl = Number((nearestSupport - buffer).toFixed(4)); // SL di luar Support mayor + buffer
+
+        let validResistances = swingHighs.filter(h => h > currentPrice).sort((a, b) => a - b);
+        if (validResistances.length > 0) {
+            targetPrices = validResistances.map(r => Number((r - buffer).toFixed(4)));
+        } else {
+            targetPrices = [Number((currentPrice + (atr * 2.0)).toFixed(4))];
+        }
     } else {
-        let localHigh = Math.max(...sampleStructure.map(c => c[2]));
-        sl = localHigh + buffer;
+        let validResistances = swingHighs.filter(h => h > currentPrice);
+        let nearestResistance = validResistances.length > 0 ? Math.max(...validResistances) : (currentPrice + (atr * 1.5));
+        sl = Number((nearestResistance + buffer).toFixed(4)); // SL di luar Resisten mayor + buffer
+
+        let validSupports = swingLows.filter(l => l < currentPrice).sort((a, b) => b - a);
+        if (validSupports.length > 0) {
+            targetPrices = validSupports.map(s => Number((s + buffer).toFixed(4)));
+        } else {
+            targetPrices = [Number((currentPrice - (atr * 2.0)).toFixed(4))];
+        }
     }
 
-    let slDistance = Math.abs(currentPrice - sl);
-    if (slDistance < atr * 0.5) {
-        slDistance = atr * 0.5;
-        sl = isBuy ? currentPrice - slDistance : currentPrice + slDistance;
+    // ATURAN KAKU: MINIMUM 18 PIP BERSIH (Khusus XAUUSD / Gold)
+    let isGold = pair.toUpperCase().includes("XAU") || pair.toUpperCase().includes("GOLD");
+    let minTpPipsRequired = isGold ? 18 : 10;
+    let pipMultiplier = isGold ? 10 : 10000; // Skala pip Gold (0.1) vs Forex (0.0001)
+
+    let finalTargets = [];
+    for (let tpPrice of targetPrices) {
+        let distancePips = Math.abs(tpPrice - currentPrice) * pipMultiplier;
+        if (distancePips >= minTpPipsRequired) {
+            finalTargets.push(tpPrice);
+        }
     }
 
-    let tp1 = Number((isBuy ? currentPrice + (slDistance * 1.2) : currentPrice - (slDistance * 1.2)).toFixed(4));
-    let tp2 = Number((isBuy ? currentPrice + (slDistance * 2.0) : currentPrice - (slDistance * 2.0)).toFixed(4));
-    let tp3 = Number((isBuy ? currentPrice + (slDistance * 3.0) : currentPrice - (slDistance * 3.0)).toFixed(4));
+    // Jika jarak TP kurang dari 18 pip bersih, tolak sinyal agar tidak habis karena spread/noise
+    if (finalTargets.length === 0) {
+        return { status: 'NO_SIGNAL', reason: `Gate 4 Rejected: Potensi TP kurang dari batas minimum (${minTpPipsRequired} pip bersih).` };
+    }
+
+    let tp1 = finalTargets[0] || null;
+    let tp2 = finalTargets[1] || null;
+    let tp3 = finalTargets[2] || null;
+    let tpCount = finalTargets.length;
 
     return {
         signalId: 'INST_ISLMS200_' + pair + '_TF' + tf + '_' + Date.now(),
@@ -307,9 +361,9 @@ function evaluateSmartMoneyConcepts(candles, pair, tf) {
         actionType: actionType,
         price: Number(currentPrice.toFixed(4)),
         entryZone: Number(currentPrice.toFixed(4)),
-        sl: Number(sl.toFixed(4)),
-        targets: [tp1, tp2, tp3],
-        tpCount: 3,
+        sl: sl,
+        targets: finalTargets,
+        tpCount: tpCount,
         tp1: tp1,
         tp2: tp2,
         tp3: tp3,
@@ -349,7 +403,6 @@ app.post('/api/developer/config', async (req, res) => {
         
         let firestoreUpdate = { updatedAt: new Date().toISOString() };
 
-        // Hanya perbarui jika nilainya ada dan tidak kosong
         if (twelveApiKey !== undefined && twelveApiKey.trim() !== '') {
             runtimeConfig.twelveApiKey = twelveApiKey.trim();
             firestoreUpdate.twelveApiKey = twelveApiKey.trim();
@@ -372,7 +425,6 @@ app.post('/api/developer/config', async (req, res) => {
         }
 
         if (db) {
-            // Menggunakan { merge: true } agar key lain yang tidak dikirim tidak ikut terhapus
             await db.collection('settings').doc('global_config').set(firestoreUpdate, { merge: true });
         }
 
@@ -381,7 +433,6 @@ app.post('/api/developer/config', async (req, res) => {
         return res.status(500).json({ success: false, error: error.message });
     }
 });
-
 
 app.get('/api/symbols/search', (req, res) => {
     const q = (req.query.q || '').trim().toUpperCase();
@@ -399,7 +450,6 @@ app.post('/api/validate-symbol', (req, res) => {
     return res.status(400).json({ valid: false, message: `Instrumen '${cleanSymbol}' ditolak whitelist.` });
 });
 
-// Endpoint Proxy Candles yang diminta oleh frontend
 app.get('/api/proxy/candles', async (req, res) => {
     try {
         const { 
@@ -439,13 +489,9 @@ app.get('/api/proxy/candles', async (req, res) => {
         } else if (provider === 'finnhub') {
             const apiKey = runtimeConfig.finnhubKey || process.env.FINNHUB_KEY || "c8888888888888888888";
             const isFx = isForex === 'true';
-            let targetUrl = '';
-
-            if (isFx) {
-                targetUrl = `${PROVIDERS.finnhub.baseUrl}/forex/candle?symbol=OANDA:${finnhubSymbol || cleanSymbol}&resolution=${resolution || '15'}&from=${from}&to=${to}&token=${apiKey}`;
-            } else {
-                targetUrl = `${PROVIDERS.finnhub.baseUrl}/stock/candle?symbol=${cleanSymbol}&resolution=${resolution || '15'}&from=${from}&to=${to}&token=${apiKey}`;
-            }
+            let targetUrl = isFx 
+                ? `${PROVIDERS.finnhub.baseUrl}/forex/candle?symbol=OANDA:${finnhubSymbol || cleanSymbol}&resolution=${resolution || '15'}&from=${from}&to=${to}&token=${apiKey}`
+                : `${PROVIDERS.finnhub.baseUrl}/stock/candle?symbol=${cleanSymbol}&resolution=${resolution || '15'}&from=${from}&to=${to}&token=${apiKey}`;
 
             const response = await axios.get(targetUrl);
             const data = response.data;
@@ -459,17 +505,9 @@ app.get('/api/proxy/candles', async (req, res) => {
             const apiKey = runtimeConfig.alphaVantageKey || process.env.ALPHA_VANTAGE_KEY || "demo";
             const isFx = isForex === 'true';
             const daily = isDaily === 'true';
-            let targetUrl = '';
-
-            if (isFx) {
-                targetUrl = daily
-                    ? `${PROVIDERS.alphaVantage.baseUrl}?function=FX_DAILY&from_symbol=${base}&to_symbol=${quote}&outputsize=full&apikey=${apiKey}`
-                    : `${PROVIDERS.alphaVantage.baseUrl}?function=FX_INTRADAY&from_symbol=${base}&to_symbol=${quote}&interval=${interval || '15min'}&outputsize=full&apikey=${apiKey}`;
-            } else {
-                targetUrl = daily
-                    ? `${PROVIDERS.alphaVantage.baseUrl}?function=TIME_SERIES_DAILY&symbol=${cleanSymbol}&outputsize=full&apikey=${apiKey}`
-                    : `${PROVIDERS.alphaVantage.baseUrl}?function=TIME_SERIES_INTRADAY&symbol=${cleanSymbol}&interval=${interval || '15min'}&outputsize=full&apikey=${apiKey}`;
-            }
+            let targetUrl = isFx
+                ? (daily ? `${PROVIDERS.alphaVantage.baseUrl}?function=FX_DAILY&from_symbol=${base}&to_symbol=${quote}&outputsize=full&apikey=${apiKey}` : `${PROVIDERS.alphaVantage.baseUrl}?function=FX_INTRADAY&from_symbol=${base}&to_symbol=${quote}&interval=${interval || '15min'}&outputsize=full&apikey=${apiKey}`)
+                : (daily ? `${PROVIDERS.alphaVantage.baseUrl}?function=TIME_SERIES_DAILY&symbol=${cleanSymbol}&outputsize=full&apikey=${apiKey}` : `${PROVIDERS.alphaVantage.baseUrl}?function=TIME_SERIES_INTRADAY&symbol=${cleanSymbol}&interval=${interval || '15min'}&outputsize=full&apikey=${apiKey}`);
 
             const response = await axios.get(targetUrl);
             const data = response.data;
@@ -614,7 +652,7 @@ wss.on('connection', (ws) => {
 });
 
 // ============================================================================
-// 7. AUTONOMOUS BACKGROUND SCHEDULER & WORKER (INTERVAL 5 DETIK)
+// 7. AUTONOMOUS BACKGROUND SCHEDULER & WORKER (INTERVAL 3.75 MENIT / 225000MS)
 // ============================================================================
 function isWeekend() {
     const now = new Date();
@@ -642,7 +680,7 @@ function isHighImpactNewsBlackout() {
     return false; 
 }
 
-const AUTONOMOUS_INTERVAL_MS = 225000;
+const AUTONOMOUS_INTERVAL_MS = 225000; // 3.75 Menit sesuai kesepakatan
 
 setInterval(async () => {
     if (!BackendState.isRunning) return;
