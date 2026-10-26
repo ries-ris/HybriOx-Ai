@@ -2,6 +2,7 @@
  * HybriOx-AI - Professional Data Ingestion Pipeline
  * Script: fetch-candles.js
  * Description: Rolling queue data fetcher with multi-provider fallback (Estafet System)
+ * Updated: Supports XAUUSD and Forex across ALL providers (Twelve Data, Alpha Vantage, Finnhub)
  */
 
 import admin from 'firebase-admin';
@@ -22,8 +23,8 @@ if (!admin.apps.length) {
 
 const db = admin.firestore();
 
-// 2. Konfigurasi Utama
-const TARGET_PAIRS = ['XAUUSD', 'BTCUSD', 'HSI', 'GBPJPY', 'EURUSD', 'USDJPY', 'AUDUSD'];
+// 2. Konfigurasi Utama (Pair favorit utama untuk menghemat kuota API)
+const TARGET_PAIRS = ['XAUUSD', 'EURUSD', 'GBPUSD', 'GBPJPY', 'USDJPY'];
 const CANDLE_COUNT = 400;
 const TIMEFRAME = '30min';
 
@@ -35,10 +36,17 @@ const PROVIDERS = [
 ];
 
 /**
- * Fungsi Fetcher untuk Twelve Data
+ * Fungsi Fetcher untuk Twelve Data (Mendukung XAUUSD & Forex secara native)
  */
 async function fetchFromTwelveData(symbol, apiKey) {
-  const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${TIMEFRAME}&outputsize=${CANDLE_COUNT}&apikey=${apiKey}`;
+  let t12Symbol = symbol;
+  if (symbol === 'XAUUSD') t12Symbol = 'XAU/USD';
+  else if (symbol === 'XAGUSD') t12Symbol = 'XAG/USD';
+  else if (symbol.length === 6 && !symbol.includes('/')) {
+    t12Symbol = `${symbol.slice(0, 3)}/${symbol.slice(3, 6)}`;
+  }
+
+  const url = `https://api.twelvedata.com/time_series?symbol=${t12Symbol}&interval=${TIMEFRAME}&outputsize=${CANDLE_COUNT}&apikey=${apiKey}`;
   const response = await fetch(url);
   const data = await response.json();
 
@@ -46,7 +54,6 @@ async function fetchFromTwelveData(symbol, apiKey) {
     throw new Error(data.message || 'Twelve Data limit or error');
   }
 
-  // Format data standar HybriOx
   return data.values.map(item => ({
     time: item.datetime,
     open: parseFloat(item.open),
@@ -54,23 +61,36 @@ async function fetchFromTwelveData(symbol, apiKey) {
     low: parseFloat(item.low),
     close: parseFloat(item.close),
     volume: parseFloat(item.volume || 0)
-  })).reverse(); // Urutkan dari terlama ke terbaru
+  })).reverse();
 }
 
 /**
- * Fungsi Fetcher untuk Alpha Vantage
+ * Fungsi Fetcher untuk Alpha Vantage (Menggunakan endpoint FX_INTRADAY khusus Forex & Gold)
  */
 async function fetchFromAlphaVantage(symbol, apiKey) {
-  // Mapping simbol khusus jika diperlukan
-  const avSymbol = symbol === 'XAUUSD' ? 'GOLD' : symbol; 
-  const url = `https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=${avSymbol}&interval=30min&outputsize=full&apikey=${apiKey}`;
+  let fromSymbol = 'EUR';
+  let toSymbol = 'USD';
+
+  if (symbol === 'XAUUSD') {
+    fromSymbol = 'XAU';
+    toSymbol = 'USD';
+  } else if (symbol === 'XAGUSD') {
+    fromSymbol = 'XAG';
+    toSymbol = 'USD';
+  } else if (symbol.length === 6) {
+    fromSymbol = symbol.slice(0, 3);
+    toSymbol = symbol.slice(3, 6);
+  }
+
+  const url = `https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol=${fromSymbol}&to_symbol=${toSymbol}&interval=30min&outputsize=full&apikey=${apiKey}`;
   
   const response = await fetch(url);
   const data = await response.json();
   
-  const timeSeriesKey = 'Time Series (30min)';
+  // Mencari key time series secara dinamis
+  const timeSeriesKey = Object.keys(data).find(k => k.includes('Time Series') || k.includes('FX Intraday'));
   if (!data[timeSeriesKey]) {
-    throw new Error(data['Note'] || 'Alpha Vantage limit or invalid response');
+    throw new Error(data['Note'] || data['Error Message'] || 'Alpha Vantage limit or invalid response');
   }
 
   const entries = Object.entries(data[timeSeriesKey]).slice(0, CANDLE_COUNT);
@@ -85,13 +105,19 @@ async function fetchFromAlphaVantage(symbol, apiKey) {
 }
 
 /**
- * Fungsi Fetcher untuk Finnhub
+ * Fungsi Fetcher untuk Finnhub (Menggunakan endpoint forex/candle untuk XAUUSD & Forex, bukan crypto)
  */
 async function fetchFromFinnhub(symbol, apiKey) {
-  // Finnhub menggunakan resolusi dalam satuan menit ('30')
+  let fhSymbol = 'EUR_USD';
+  if (symbol === 'XAUUSD') fhSymbol = 'XAU_USD';
+  else if (symbol === 'XAGUSD') fhSymbol = 'XAG_USD';
+  else if (symbol.length === 6) {
+    fhSymbol = `${symbol.slice(0, 3)}_${symbol.slice(3, 6)}`;
+  }
+
   const now = Math.floor(Date.now() / 1000);
-  const from = now - (CANDLE_COUNT * 30 * 60); // Estimasi rentang waktu ke belakang
-  const url = `https://finnhub.io/api/v1/crypto/candle?symbol=BINANCE:${symbol}&resolution=30&from=${from}&to=${now}&token=${apiKey}`;
+  const from = now - (CANDLE_COUNT * 30 * 60); // 30 menit per candle
+  const url = `https://finnhub.io/api/v1/forex/candle?symbol=OANDA:${fhSymbol}&resolution=30&from=${from}&to=${now}&token=${apiKey}`;
   
   const response = await fetch(url);
   const data = await response.json();
@@ -106,7 +132,7 @@ async function fetchFromFinnhub(symbol, apiKey) {
     high: data.h[index],
     low: data.l[index],
     close: data.c[index],
-    volume: data.v[index]
+    volume: parseFloat(data.v ? data.v[index] : 0)
   }));
 }
 
@@ -138,7 +164,7 @@ async function fetchCandlesWithEstafet(symbol) {
         return {
           success: true,
           provider: provider.name,
-          candles: candles.slice(-CANDLE_COUNT) // Pastikan pas maksimal 400
+          candles: candles.slice(-CANDLE_COUNT)
         };
       }
     } catch (error) {
@@ -180,7 +206,6 @@ async function main() {
     payloadData.status = 'partial_success';
   }
 
-  // Simpan secara rolling ke Firestore pada dokumen tunggal 'macro_candles/latest_m30'
   const docRef = db.collection('macro_candles').doc('latest_m30');
   await docRef.set(payloadData, { merge: true });
 
