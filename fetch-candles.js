@@ -2,7 +2,7 @@
  * HybriOx-AI - Professional Data Ingestion Pipeline
  * Script: fetch-candles.js
  * Description: Rolling queue data fetcher with multi-provider fallback (Estafet System)
- * Updated: Supports XAUUSD and Forex across ALL providers (Twelve Data, Alpha Vantage, Finnhub)
+ * Updated: Flipped and restricted to TARGET_PAIRS: XAUUSD, GBPJPY, EURUSD
  */
 
 import admin from 'firebase-admin';
@@ -23,8 +23,8 @@ if (!admin.apps.length) {
 
 const db = admin.firestore();
 
-// 2. Konfigurasi Utama (Pair favorit utama untuk menghemat kuota API)
-const TARGET_PAIRS = ['XAUUSD', 'EURUSD', 'GBPUSD', 'GBPJPY', 'USDJPY'];
+// 2. Konfigurasi Utama (Disesuaikan hanya untuk 3 pair pilihan utama)
+const TARGET_PAIRS = ['XAUUSD', 'GBPJPY', 'EURUSD'];
 const CANDLE_COUNT = 400;
 const TIMEFRAME = '30min';
 
@@ -179,7 +179,7 @@ async function fetchCandlesWithEstafet(symbol) {
  * Eksekusi Utama Pipeline
  */
 async function main() {
-  console.log('🚀 Memulai siklus pengambilan data HybriOx-AI M30...');
+  console.log('🚀 Memulai siklus pengambilan data makro HybriOx-AI M30 (Fokus: XAUUSD, GBPJPY, EURUSD)...');
   const payloadData = {
     lastUpdated: new Date().toISOString(),
     status: 'success',
