@@ -491,6 +491,35 @@ app.post('/api/developer/config', async (req, res) => {
     }
 });
 
+// ENDPOINT AI CHAT PROXY (UNTUK KONSULTASI GRATIS DARI SERVER)
+app.post('/api/ai/chat', async (req, res) => {
+    try {
+        const { prompt, symbol } = req.body;
+        let activeKey = runtimeConfig.geminiApiKey || process.env.GEMINI_API_KEY;
+        
+        if (!activeKey) {
+            return res.status(400).json({ 
+                success: false, 
+                reply: "Maaf, Master Gemini API Key belum dikonfigurasi di server backend." 
+            });
+        }
+
+        let geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${activeKey}`;
+        let response = await axios.post(geminiUrl, {
+            contents: [{ 
+                parts: [{ 
+                    text: `Anda adalah AI Consultant trading profesional. Berikan analisis dan solusi strategis untuk pair ${symbol || 'EURUSD'}. Pertanyaan user: ${prompt}` 
+                }] 
+            }]
+        });
+
+        let aiReply = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || "AI merespons: Parameter diskusi dipahami.";
+        return res.json({ success: true, reply: aiReply });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.get('/api/symbols/search', (req, res) => {
     const q = (req.query.q || '').trim().toUpperCase();
     if (!q || q.length < 2) return res.json({ success: true, symbols: [] });
