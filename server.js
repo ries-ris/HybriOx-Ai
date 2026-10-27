@@ -507,38 +507,48 @@ app.post('/api/validate-symbol', (req, res) => {
     return res.status(400).json({ valid: false });
 });
 
+// PROXY ENDPOINT YANG SUDAH DIUBAH MENJADI OTOMATIS ESTAFET
 app.get('/api/proxy/candles', async (req, res) => {
     try {
-        const { provider = 'twelvedata', symbol, interval, finnhubSymbol, resolution, from, to, isForex, isDaily, base, quote } = req.query;
+        const { symbol, tf, interval } = req.query;
         const cleanSymbol = (symbol || "").trim().toUpperCase();
 
-        if (provider === 'twelvedata') {
-            const apiKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo";
-            const t12Interval = interval || '15min';
-            const formattedSym = formatSymbolForProvider(cleanSymbol, 'twelveData');
-            const targetUrl = `${PROVIDERS.twelveData.baseUrl}/time_series?symbol=${encodeURIComponent(formattedSym)}&interval=${t12Interval}&outputsize=200&apikey=${apiKey}`;
-            const response = await axios.get(targetUrl);
-            return res.json(response.data);
-        } else if (provider === 'finnhub') {
-            const apiKey = runtimeConfig.finnhubKey || process.env.FINNHUB_KEY || "c8888888888888888888";
-            const isFx = isForex === 'true';
-            let targetUrl = isFx 
-                ? `${PROVIDERS.finnhub.baseUrl}/forex/candle?symbol=OANDA:${finnhubSymbol || cleanSymbol}&resolution=${resolution || '15'}&from=${from}&to=${to}&token=${apiKey}`
-                : `${PROVIDERS.finnhub.baseUrl}/stock/candle?symbol=${cleanSymbol}&resolution=${resolution || '15'}&from=${from}&to=${to}&token=${apiKey}`;
-            const response = await axios.get(targetUrl);
-            return res.json(response.data);
-        } else if (provider === 'alphavantage') {
-            const apiKey = runtimeConfig.alphaVantageKey || process.env.ALPHA_VANTAGE_KEY || "demo";
-            const isFx = isForex === 'true';
-            const daily = isDaily === 'true';
-            let targetUrl = isFx
-                ? (daily ? `${PROVIDERS.alphaVantage.baseUrl}?function=FX_DAILY&from_symbol=${base}&to_symbol=${quote}&outputsize=full&apikey=${apiKey}` : `${PROVIDERS.alphaVantage.baseUrl}?function=FX_INTRADAY&from_symbol=${base}&to_symbol=${quote}&interval=${interval || '15min'}&outputsize=full&apikey=${apiKey}`)
-                : (daily ? `${PROVIDERS.alphaVantage.baseUrl}?function=TIME_SERIES_DAILY&symbol=${cleanSymbol}&outputsize=full&apikey=${apiKey}` : `${PROVIDERS.alphaVantage.baseUrl}?function=TIME_SERIES_INTRADAY&symbol=${cleanSymbol}&interval=${interval || '15min'}&outputsize=full&apikey=${apiKey}`);
-            const response = await axios.get(targetUrl);
-            return res.json(response.data);
-        } else {
-            return res.status(400).json({ success: false });
+        if (!MASTER_WHITELIST.includes(cleanSymbol)) {
+            return res.status(403).json({ success: false, message: "Simbol tidak ada di Master Whitelist." });
         }
+
+        let timeframeMinutes = 15;
+        if (tf === '1' || interval === '1min') timeframeMinutes = 1;
+        else if (tf === '5' || interval === '5min') timeframeMinutes = 5;
+        else if (tf === '15' || interval === '15min') timeframeMinutes = 15;
+        else if (tf === '30' || interval === '30min') timeframeMinutes = 30;
+        else if (tf === '60' || interval === '1h') timeframeMinutes = 60;
+        else if (tf === '240' || interval === '4h') timeframeMinutes = 240;
+
+        // Panggil fungsi estafet otomatis backend
+        let candles = await fetchCandlesWithFallback(cleanSymbol, timeframeMinutes);
+
+        if (candles && candles.length > 0) {
+            return res.json({
+                success: true,
+                provider: "HybriOX Smart Proxy (Auto-Failover Active)",
+                values: candles.map(c => ({
+                    datetime: new Date(c[0]).toISOString(),
+                    open: c[1],
+                    high: c[2],
+                    low: c[3],
+                    close: c[4],
+                    volume: c[5]
+                }))
+            });
+        }
+
+        return res.status(404).json({ 
+            success: false, 
+            isInvalidSymbol: true, 
+            message: `Simbol '${cleanSymbol}' gagal ditarik dari semua provider.` 
+        });
+
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
     }
