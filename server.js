@@ -1,11 +1,11 @@
 /**
- * HybriOX Professional-Grade Backend Proxy & Asset Management Server[span_2](start_span)[span_2](end_span)
- * - Full Multi-Provider Support & Automated Fallback Estafet (Twelve Data -> Finnhub -> Alpha Vantage)[span_3](start_span)[span_3](end_span)
- * - Strict Master Registry Whitelist (25 Authorized Instruments)[span_4](start_span)[span_4](end_span)
- * - XAUUSDInstitutionalEngine (Top-Down M30 -> M15 -> M5 & TP-First / 180° Mirror SL)[span_5](start_span)[span_5](end_span)
- * - Autonomous Forex Factory News Guard (High-Impact USD Filter)[span_6](start_span)[span_6](end_span)
- * - Tier Distribution Pipeline & WebSocket Integration[span_7](start_span)[span_7](end_span)
- * - ES Module Syntax (Compatible with package.json "type": "module")[span_8](start_span)[span_8](end_span)
+ * HybriOX Professional-Grade Backend Proxy & Asset Management Server
+ * - Full Multi-Provider Support & Automated Fallback Estafet (Twelve Data -> Finnhub -> Alpha Vantage)
+ * - Strict Master Registry Whitelist (Authorized Instruments)
+ * - XAUUSDInstitutionalEngine (Top-Down M30 -> M15 -> M5 & TP-First / 180° Mirror SL)
+ * - Autonomous Forex Factory News Guard (High-Impact USD Filter)
+ * - Tier Distribution Pipeline & WebSocket Integration
+ * - ES Module Syntax (Compatible with package.json "type": "module")
  */
 
 import express from 'express';
@@ -15,7 +15,7 @@ import http from 'http';
 import { WebSocketServer } from 'ws';
 import admin from 'firebase-admin';
 
-// Inisialisasi Firebase Admin untuk Backend[span_9](start_span)[span_9](end_span)
+// Inisialisasi Firebase Admin untuk Backend
 if (!admin.apps.length) {
     try {
         if (process.env.FIREBASE_SERVICE_ACCOUNT) {
@@ -39,15 +39,12 @@ const wss = new WebSocketServer({ server });
 app.use(cors());
 app.use(express.json());
 
-// 1. MASTER REGISTRY WHITELIST (25 Authorized Instruments)[span_10](start_span)[span_10](end_span)
+// 1. MASTER REGISTRY WHITELIST
 const MASTER_WHITELIST = [
-    // Forex Majors & Crosses
-    "EURUSD", "GBPJPY",
-    // Metals & Commodities
-    "XAUUSD",
+    "EURUSD", "GBPJPY", "XAUUSD"
 ];
 
-// 2. RUNTIME CONFIGURATION FOR API KEYS & PROVIDERS[span_11](start_span)[span_11](end_span)
+// 2. RUNTIME CONFIGURATION FOR API KEYS & PROVIDERS
 let runtimeConfig = {
     twelveApiKey: process.env.TWELVE_DATA_API_KEY || '',
     finnhubKey: process.env.FINNHUB_KEY || '',
@@ -56,23 +53,21 @@ let runtimeConfig = {
     tier: 'free'
 };
 
-// State Otonom Backend (Session, Emergency Stop, Scheduler, News Guard Cache)[span_12](start_span)[span_12](end_span)
+// State Otonom Backend
 let BackendState = {
     isRunning: true,
     econCalendarFilterActive: true,
     activeSessions: {
-        asia: { start: 5, end: 14 },     // 05:00 - 14:00[span_13](start_span)[span_13](end_span)
-        london: { start: 14, end: 22 },  // 14:00 - 22:00[span_14](start_span)[span_14](end_span)
-        newYork: { start: 20, end: 4 }   // 20:00 - 04:00[span_15](start_span)[span_15](end_span)
+        asia: { start: 5, end: 14 },     // 05:00 - 14:00
+        london: { start: 14, end: 22 },  // 14:00 - 22:00
+        newYork: { start: 20, end: 4 }   // 20:00 - 04:00
     },
     cachedNewsEvents: [],
     lastNewsFetchTime: 0
 };
 
-// Penyimpanan State Cooldown di Sisi Server (Mencegah Spam Sinyal WebSocket)[span_16](start_span)[span_16](end_span)
 const backendLastSignalRecord = {};
 
-// Fungsi memuat ulang konfigurasi Global API Keys dari Firebase saat server menyala[span_17](start_span)[span_17](end_span)
 async function loadGlobalConfigFromFirebase() {
     try {
         if (db) {
@@ -115,9 +110,7 @@ function formatSymbolForProvider(cleanSymbol, provider) {
     return cleanSymbol;
 }
 
-// ============================================================================
-// MODUL PENGAMAN: FOREX FACTORY PUBLIC ECONOMIC CALENDAR (FREE & NO API KEY)[span_18](start_span)[span_18](end_span)
-// ============================================================================
+// MODUL PENGAMAN: FOREX FACTORY PUBLIC ECONOMIC CALENDAR
 async function fetchAndCacheEconomicCalendar() {
     let now = Date.now();
     if (now - BackendState.lastNewsFetchTime < 14400000 && BackendState.cachedNewsEvents.length > 0) {
@@ -144,7 +137,7 @@ async function isHighImpactNewsBlackout() {
     if (!events || events.length === 0) return false;
 
     let currentTime = Date.now();
-    let blackoutWindowMs = 17 * 60 * 1000; // 17 Menit sebelum & sesudah berita[span_19](start_span)[span_19](end_span)
+    let blackoutWindowMs = 15 * 60 * 1000; // 15 Menit sebelum & sesudah berita
 
     for (let ev of events) {
         if (ev.country === 'USD' && ev.impact && ev.impact.toLowerCase() === 'high') {
@@ -161,7 +154,6 @@ async function isHighImpactNewsBlackout() {
     return false;
 }
 
-// Helper untuk Mengambil Cache Makro M30 (400 Candle) dari Firestore Local Storage[span_20](start_span)[span_20](end_span)
 async function getMacroCache400(pairSymbol) {
     try {
         if (db) {
@@ -179,16 +171,14 @@ async function getMacroCache400(pairSymbol) {
     return [];
 }
 
-// ============================================================================
 // SISTEM ESTAFET OTOMATIS: TWELVE DATA -> FINNHUB -> ALPHA VANTAGE
-// ============================================================================
 async function fetchCandlesWithFallback(pairSymbol, timeframeMinutes) {
     let cleanSymbol = pairSymbol.toUpperCase();
     let intervalParam = timeframeMinutes === 15 ? '15min' : '5min';
     let resolutionParam = timeframeMinutes === 15 ? '15' : '5';
     let candles = [];
 
-    // --- TAHAP 1: Coba Melalui Twelve Data ---
+    // --- TAHAP 1: Twelve Data ---
     try {
         let activeKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo";
         let formattedSym = formatSymbolForProvider(cleanSymbol, 'twelveData');
@@ -207,10 +197,10 @@ async function fetchCandlesWithFallback(pairSymbol, timeframeMinutes) {
             }
         }
     } catch (e) {
-        console.log(`[Provider Estafet Warning] Twelve Data gagal/limit untuk ${cleanSymbol}, mengoper ke Finnhub...`);
+        console.log(`[Provider Estafet Warning] Twelve Data gagal untuk ${cleanSymbol}, mengoper ke Finnhub...`);
     }
 
-    // --- TAHAP 2: Estafet ke Finnhub (Fallback Pertama) ---
+    // --- TAHAP 2: Finnhub ---
     try {
         let apiKey = runtimeConfig.finnhubKey || process.env.FINNHUB_KEY || "c8888888888888888888";
         let isFx = cleanSymbol.length === 6 || cleanSymbol.includes('XAU');
@@ -230,15 +220,15 @@ async function fetchCandlesWithFallback(pairSymbol, timeframeMinutes) {
                 parseFloat(data.o[idx]), parseFloat(data.h[idx]), parseFloat(data.l[idx]), parseFloat(data.c[idx]), parseFloat(data.v[idx] || 100)
             ]);
             if (candles.length > 0) {
-                console.log(`[Provider Estafet] Sukses menarik data ${cleanSymbol} (${timeframeMinutes}m) via Finnhub (Fallback 1).`);
+                console.log(`[Provider Estafet] Sukses menarik data ${cleanSymbol} (${timeframeMinutes}m) via Finnhub.`);
                 return candles;
             }
         }
     } catch (e) {
-        console.log(`[Provider Estafet Warning] Finnhub gagal, mengoper estafet terakhir ke Alpha Vantage...`);
+        console.log(`[Provider Estafet Warning] Finnhub gagal, mengoper ke Alpha Vantage...`);
     }
 
-    // --- TAHAP 3: Estafet ke Alpha Vantage (Fallback Terakhir) ---
+    // --- TAHAP 3: Alpha Vantage ---
     try {
         let apiKey = runtimeConfig.alphaVantageKey || process.env.ALPHA_VANTAGE_KEY || "demo";
         let isFx = cleanSymbol.length === 6 || cleanSymbol.includes('XAU');
@@ -261,43 +251,35 @@ async function fetchCandlesWithFallback(pairSymbol, timeframeMinutes) {
             ]).sort((a, b) => a[0] - b[0]);
 
             if (candles.length > 0) {
-                console.log(`[Provider Estafet] Sukses menarik data ${cleanSymbol} (${timeframeMinutes}m) via Alpha Vantage (Fallback 2).`);
+                console.log(`[Provider Estafet] Sukses menarik data ${cleanSymbol} (${timeframeMinutes}m) via Alpha Vantage.`);
                 return candles;
             }
         }
     } catch (e) {
-        console.log(`[Provider Estafet Error] Semua provider (Twelve Data, Finnhub, Alpha Vantage) gagal merespons.`);
+        console.log(`[Provider Estafet Error] Semua provider gagal merespons.`);
     }
 
     return [];
 }
 
-// ============================================================================
-// 3. MESIN INSTITUSIONAL: XAUUSDInstitutionalEngine (TOP-DOWN M30 -> M15 -> M5)[span_21](start_span)[span_21](end_span)
-// ============================================================================
+// MESIN INSTITUSIONAL
 async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
     if (!BackendState.isRunning) {
-        console.log('[Engine] Sistem dalam status Emergency Stop (Kill Switch Aktif).');
         return null;
     }
 
-    console.log(`[Engine WSM-200] Menjalankan analisis Hierarki M30 -> M15 -> M5 dengan Sistem Estafet Provider untuk ${pairSymbol}...`);
-
     try {
-        // Tarik data M15 dan M5 secara pararel menggunakan sistem estafet
         let [m15Candles, m5Candles] = await Promise.all([
             fetchCandlesWithFallback(pairSymbol, 15),
             fetchCandlesWithFallback(pairSymbol, 5)
         ]);
 
-        // Ambil makro M30 dari Local Storage Firebase[span_22](start_span)[span_22](end_span)
         let m30MacroCandles = await getMacroCache400(pairSymbol);
 
         if (m15Candles.length < 50 || m30MacroCandles.length < 50 || m5Candles.length < 10) {
-            return { status: 'NO_SIGNAL', reason: 'Data multi-timeframe gagal ditarik dari seluruh jalur provider / Firebase.' };
+            return { status: 'NO_SIGNAL', reason: 'Data multi-timeframe belum lengkap.' };
         }
 
-        // Masukkan ke Mesin Evaluasi Strategi WSM-200 (Top-Down + TP-First + 180° Mirror SL)[span_23](start_span)[span_23](end_span)
         let signalResult = evaluateWSM200InstitutionalStrategy(m30MacroCandles, m15Candles, m5Candles, pairSymbol);
 
         if (signalResult && signalResult.status === 'TRIGGERED') {
@@ -307,7 +289,7 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
             let lastStratRecord = backendLastSignalRecord[stratContextKey];
 
             if (lastStratRecord && currentCandleTime <= lastStratRecord.candleTime) {
-                return { status: 'NO_SIGNAL', reason: 'Sinyal pada candle ini sudah pernah dieksekusi.' };
+                return { status: 'NO_SIGNAL' };
             }
 
             backendLastSignalRecord[stratContextKey] = {
@@ -318,24 +300,19 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
         }
 
         return signalResult;
-
     } catch (e) {
         console.error('[Engine Pipeline Error]:', e.message);
         return null;
     }
 }
 
-// ============================================================================
-// MESIN WSM-200: M30 BIAS -> M15 SNR ANCHOR -> M5 ENTRY & 180° MIRROR SL[span_24](start_span)[span_24](end_span)
-// ============================================================================
 function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, pairSymbol) {
     let cleanSym = (pairSymbol || "").toUpperCase();
     let isGold = cleanSym.includes("XAU") || cleanSym.includes("GOLD");
-    if (!isGold) return { status: 'NO_SIGNAL', reason: 'Modul khusus instrumen XAUUSD.' };
+    if (!isGold) return { status: 'NO_SIGNAL' };
 
     let currentPrice = candlesM5[candlesM5.length - 1][4];
 
-    // Lapis 1: M30 Macro Bias & Dealing Range (Discount vs Premium)
     let m30Sample = candlesM30.slice(-400);
     let m30High = Math.max(...m30Sample.map(c => c[2]));
     let m30Low = Math.min(...m30Sample.map(c => c[3]));
@@ -343,7 +320,6 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
     let macroBias = currentPrice < m30Equilibrium ? 'DISCOUNT_BUY' : 'PREMIUM_SELL';
 
-    // Lapis 2: M15 Structural Anchor (SNR & Dealing Range)
     let m15Sample = candlesM15.slice(-200);
     let m15Supports = [];
     let m15Resistances = [];
@@ -359,7 +335,6 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         }
     }
 
-    // Lapis 3: M5 Precision Execution & Zone Validation
     let actionType = null;
     let targetSupport = null;
     let targetResistance = null;
@@ -386,12 +361,11 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     }
 
     if (!actionType) {
-        return { status: 'NO_SIGNAL', reason: 'Menunggu harga masuk zona struktur SNR M15 terkonfirmasi M5.' };
+        return { status: 'NO_SIGNAL' };
     }
 
-    // Kalkulasi TP First & 180° Mirror SL (Anti-Stop-Hunt)
     let entryPrice = currentPrice;
-    let minNetPipDistance = 1.8; // 18 pips x 0.1 = 1.8 USD bersih[span_25](start_span)[span_25](end_span)
+    let minNetPipDistance = 1.8; 
     let spreadAndBuffer = 0.5;   
     let sl = 0;
     let tp1 = 0, tp2 = null, tp3 = null;
@@ -411,10 +385,9 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
         let netPipCheck = Math.abs(tp1 - entryPrice);
         if (netPipCheck < minNetPipDistance) {
-            return { status: 'NO_SIGNAL', reason: 'Ditolak: Jarak TP1 kurang dari minimum 18 pip bersih.' };
+            return { status: 'NO_SIGNAL' };
         }
 
-        // Proyeksi 180 Derajat ke Bawah untuk SL (Anti-Stop-Hunt)[span_26](start_span)[span_26](end_span)
         let upwardSpan = Math.abs(tp1 - entryPrice);
         sl = Number((entryPrice - upwardSpan).toFixed(2));
 
@@ -432,10 +405,9 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
         let netPipCheck = Math.abs(entryPrice - tp1);
         if (netPipCheck < minNetPipDistance) {
-            return { status: 'NO_SIGNAL', reason: 'Ditolak: Jarak TP1 kurang dari minimum 18 pip bersih.' };
+            return { status: 'NO_SIGNAL' };
         }
 
-        // Proyeksi 180 Derajat ke Atas untuk SL (Anti-Stop-Hunt)[span_27](start_span)[span_27](end_span)
         let downwardSpan = Math.abs(entryPrice - tp1);
         sl = Number((entryPrice + downwardSpan).toFixed(2));
     }
@@ -445,7 +417,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         pair: pairSymbol,
         timeframe: 'M30->M15->M5',
         status: 'TRIGGERED',
-        strategyName: 'WSM-200 Gold Sniper (Top-Down M30/M15/M5 + 180° Mirror SL)',[span_28](start_span)[span_28](end_span)
+        strategyName: 'WSM-200 Gold Sniper (Top-Down M30/M15/M5 + 180° Mirror SL)',
         actionType: actionType,
         price: Number(entryPrice.toFixed(2)),
         entryZone: Number(entryPrice.toFixed(2)),
@@ -461,9 +433,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     };
 }
 
-// ============================================================================
-// 4. REST API ENDPOINTS[span_29](start_span)[span_29](end_span)
-// ============================================================================
+// REST API ENDPOINTS
 app.get('/api/macro/latest', async (req, res) => {
     try {
         if (!db) return res.status(500).json({ success: false, message: 'Firestore belum diinisialisasi.' });
@@ -478,11 +448,11 @@ app.get('/api/macro/latest', async (req, res) => {
 app.post('/api/verify-dev', (req, res) => {
     const { password } = req.body;
     const devPassword = process.env.DEV_PASSWORD;
-    if (!devPassword) return res.status(500).json({ success: false, message: "DEV_PASSWORD belum diatur di Render." });
+    if (!devPassword) return res.status(500).json({ success: false, message: "DEV_PASSWORD belum diatur." });
     if (password && password.trim() === devPassword) {
-        return res.json({ success: true, message: "Akses diverifikasi." });
+        return res.json({ success: true });
     }
-    return res.status(401).json({ success: false, message: "Sandi pengembang salah." });
+    return res.status(401).json({ success: false });
 });
 
 app.post('/api/developer/config', async (req, res) => {
@@ -515,7 +485,7 @@ app.post('/api/developer/config', async (req, res) => {
             await db.collection('settings').doc('global_config').set(firestoreUpdate, { merge: true });
         }
 
-        return res.json({ success: true, message: "Konfigurasi diperbarui dengan aman!" });
+        return res.json({ success: true });
     } catch (error) {
         return res.status(500).json({ success: false, error: error.message });
     }
@@ -534,7 +504,7 @@ app.post('/api/validate-symbol', (req, res) => {
     if (MASTER_WHITELIST.includes(cleanSymbol)) {
         return res.json({ valid: true, symbol: cleanSymbol });
     }
-    return res.status(400).json({ valid: false, message: `Instrumen '${cleanSymbol}' ditolak whitelist.` });
+    return res.status(400).json({ valid: false });
 });
 
 app.get('/api/proxy/candles', async (req, res) => {
@@ -567,10 +537,10 @@ app.get('/api/proxy/candles', async (req, res) => {
             const response = await axios.get(targetUrl);
             return res.json(response.data);
         } else {
-            return res.status(400).json({ success: false, message: "Provider proxy tidak dikenal" });
+            return res.status(400).json({ success: false });
         }
     } catch (error) {
-        return res.status(500).json({ success: false, isInvalidSymbol: false, message: error.message });
+        return res.status(500).json({ success: false, message: error.message });
     }
 });
 
@@ -579,7 +549,7 @@ app.get('/api/v1/market', async (req, res) => {
     const cleanSymbol = (symbol || "").trim().toUpperCase();
 
     if (!MASTER_WHITELIST.includes(cleanSymbol)) {
-        return res.status(403).json({ error: "Access Denied", message: "Simbol tidak ada di Katalog Master Whitelist." });
+        return res.status(403).json({ error: "Access Denied" });
     }
 
     const cacheKey = `${provider}_${cleanSymbol}_${interval}`;
@@ -622,33 +592,27 @@ app.get('/api/v1/market', async (req, res) => {
 
 app.post('/api/sync', (req, res) => {
     const tradeRecord = req.body;
-    return res.json({ success: true, message: 'Disinkronkan ke server.', data: tradeRecord });
+    return res.json({ success: true, data: tradeRecord });
 });
 
-// ============================================================================
-// 5. JALUR DISTRIBUSI SINYAL BERBASIS TIER (PIPELINE)[span_30](start_span)[span_30](end_span)
-// ============================================================================
+// TIER PIPELINE
 function routeSignalThroughTierPipeline(signalData, clientTier) {
     if (clientTier === 'free' || !clientTier) {
-        return { ...signalData, tierTarget: 'STANDARD', allowed: true, note: 'Dialirkan ke jalur Standar Tier' };
+        return { ...signalData, tierTarget: 'STANDARD', allowed: true };
     } 
     else if (clientTier === 'premium' || clientTier === 'vip') {
-        return { ...signalData, tierTarget: 'PREMIUM', allowed: true, note: 'Dialirkan ke jalur Premium Tier (Full Access)' };
+        return { ...signalData, tierTarget: 'PREMIUM', allowed: true };
     }
     return null;
 }
 
-// ============================================================================
-// 6. WEBSOCKET SERVER[span_31](start_span)[span_31](end_span)
-// ============================================================================
+// WEBSOCKET SERVER
 wss.on('connection', (ws) => {
-    console.log('[WebSocket Backend] Klien Panel Developer terhubung secara aktif.');
     ws.tier = 'free';
 
     ws.on('message', async (message) => {
         try {
             const parsed = JSON.parse(message);
-            console.log(`[WebSocket Backend] Menerima aksi kendali: ${parsed.action || parsed.type}`);
 
             if (parsed.tier) {
                 ws.tier = parsed.tier;
@@ -665,24 +629,18 @@ wss.on('connection', (ws) => {
             } 
             else if (parsed.action === 'EMERGENCY_STOP' || parsed.type === 'EMERGENCY_STOP') {
                 BackendState.isRunning = false;
-                ws.send(JSON.stringify({ type: 'SYSTEM_STATUS', message: 'Emergency Stop berhasil diterapkan di server.' }));
+                ws.send(JSON.stringify({ type: 'SYSTEM_STATUS', message: 'Emergency Stop aktif.' }));
             } 
             else {
                 ws.send(JSON.stringify({ status: 'ack', payload: parsed }));
             }
         } catch (e) {
-            ws.send(JSON.stringify({ error: 'Format pesan WebSocket tidak valid.' }));
+            ws.send(JSON.stringify({ error: 'Format tidak valid.' }));
         }
-    });
-
-    ws.on('close', () => {
-        console.log('[WebSocket Backend] Klien Panel Developer terputus.');
     });
 });
 
-// ============================================================================
-// 7. AUTONOMOUS BACKGROUND SCHEDULER & WORKER (INTERVAL 3.75 MENIT / 225000MS)[span_32](start_span)[span_32](end_span)
-// ============================================================================
+// AUTONOMOUS SCHEDULER
 function isWeekend() {
     const now = new Date();
     const day = now.getDay();
@@ -704,7 +662,7 @@ function isWithinSessionRange() {
     return false;
 }
 
-const AUTONOMOUS_INTERVAL_MS = 225000; // 3.75 Menit[span_33](start_span)[span_33](end_span)
+const AUTONOMOUS_INTERVAL_MS = 225000; // 3.75 Menit
 
 setInterval(async () => {
     if (!BackendState.isRunning) return;
@@ -714,7 +672,6 @@ setInterval(async () => {
     try {
         let inNewsBlackout = await isHighImpactNewsBlackout();
         if (inNewsBlackout) {
-            console.log('[News Guard] Sinyal XAUUSD ditahan sementara karena ada rilis High-Impact News USD.');
             return;
         }
 
@@ -722,8 +679,6 @@ setInterval(async () => {
         let signalResult = await runInstitutionalEnginePipeline(targetSymbol, "15");
 
         if (signalResult && signalResult.status === 'TRIGGERED') {
-            console.log(`[Autonomous Engine] Sinyal WSM-200 & 180° Mirror SL Valid! Menyiarkan sinyal ${targetSymbol} via WebSocket.`);
-            
             wss.clients.forEach(client => {
                 if (client.readyState === WebSocket.OPEN) {
                     let userTier = client.tier || 'free';
@@ -743,10 +698,8 @@ setInterval(async () => {
     }
 }, AUTONOMOUS_INTERVAL_MS);
 
-// ============================================================================
-// SERVER LISTEN[span_34](start_span)[span_34](end_span)
-// ============================================================================
+// SERVER LISTEN
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`HybriOX Autonomous Backend & Proxy aktif dan berjalan pada port ${PORT}`);
+    console.log(`HybriOX Autonomous Backend aktif pada port ${PORT}`);
 });
