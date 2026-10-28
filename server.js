@@ -158,15 +158,22 @@ async function isHighImpactNewsBlackout() {
     return false;
 }
 
-// Helper untuk Mengambil Cache Makro M30 (400 Candle) dari Firestore Local Storage
+// ============================================================================
+// HELPER: Mengambil Cache Makro M30 (400 Candle) dari Firestore 
+// (Disesuaikan selaras dengan struktur penyimpanan fetch-candles.js)
+// ============================================================================
 async function getMacroCache400(pairSymbol) {
     try {
         if (db) {
-            let docSnap = await db.collection('macro_cache').doc(pairSymbol.toUpperCase()).get();
+            // Mengambil dari dokumen terpusat 'latest_m30' pada koleksi 'macro_candles'
+            let docSnap = await db.collection('macro_candles').doc('latest_m30').get();
             if (docSnap.exists) {
                 let data = docSnap.data();
-                if (Array.isArray(data.candles) && data.candles.length > 0) {
-                    return data.candles.slice(-400);
+                let cleanSym = (pairSymbol || "").toUpperCase();
+                
+                // Mengambil array candle dari objek candles berdasarkan key pair (XAUUSD, GBPJPY, EURUSD)
+                if (data.candles && Array.isArray(data.candles[cleanSym]) && data.candles[cleanSym].length > 0) {
+                    return data.candles[cleanSym].slice(-400);
                 }
             }
         }
