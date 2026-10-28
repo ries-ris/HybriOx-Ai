@@ -460,13 +460,12 @@ app.post('/api/validate-symbol', (req, res) => {
     return res.status(400).json({ valid: false, message: `Instrumen '${cleanSymbol}' ditolak whitelist.` });
 });
 
-// Endpoint Proxy Candles yang disesuaikan untuk mendukung respons error estafet frontend
 app.get('/api/proxy/candles', async (req, res) => {
     try {
         const { provider = 'twelvedata', symbol, interval, finnhubSymbol, resolution, from, to, isForex, isDaily, base, quote } = req.query;
         const cleanSymbol = (symbol || "").trim().toUpperCase();
 
-        if (provider === 'twelveData') {
+        if (provider === 'twelvedata') {
             const apiKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo";
             const t12Interval = interval || '15min';
             const formattedSym = formatSymbolForProvider(cleanSymbol, 'twelveData');
@@ -494,15 +493,7 @@ app.get('/api/proxy/candles', async (req, res) => {
             return res.status(400).json({ success: false, message: "Provider proxy tidak dikenal" });
         }
     } catch (error) {
-        const errorMsg = error.response?.data?.message || error.message || "";
-        const status = error.response?.status || 500;
-        const isNotFound = status === 400 || status === 404 || errorMsg.toLowerCase().includes('symbol not found') || errorMsg.toLowerCase().includes('does not exist');
-
-        return res.status(status).json({ 
-            success: false, 
-            isInvalidSymbol: isNotFound, 
-            message: errorMsg 
-        });
+        return res.status(500).json({ success: false, isInvalidSymbol: false, message: error.message });
     }
 });
 
