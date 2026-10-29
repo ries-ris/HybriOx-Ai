@@ -1,9 +1,9 @@
 /**
  * HybriOX Professional-Grade Backend Proxy & Asset Management Server
- * - Full Multi-Provider Support (Twelve Data, Finnhub, Alpha Vantage / Fallbacks)
- * - Strict Master Registry Whitelist (3 Authorized Instruments: XAUUSD, GBPJPY, EURUSD)
+ * - Full Multi-Provider Support & High-Speed Racing Architecture (Twelve Data vs Finnhub vs Alpha Vantage)
+ * - Strict Master Registry Whitelist (Authorized Instruments)
  * - XAUUSDInstitutionalEngine (Top-Down M30 -> M15 -> M5 & TP-First / 180° Mirror SL)
- * - Autonomous Forex Factory News Guard (High-Impact USD Filter)
+ * - Autonomous Forex Factory News Guard (High-Impact USD Filter - 30 Min Window)
  * - Tier Distribution Pipeline & WebSocket Integration
  * - ES Module Syntax (Compatible with package.json "type": "module")
  */
@@ -39,9 +39,9 @@ const wss = new WebSocketServer({ server });
 app.use(cors());
 app.use(express.json());
 
-// 1. MASTER REGISTRY WHITELIST (3 Authorized Instruments)
+// 1. MASTER REGISTRY WHITELIST
 const MASTER_WHITELIST = [
-    "XAUUSD", "GBPJPY", "EURUSD"
+    "EURUSD", "GBPJPY", "XAUUSD"
 ];
 
 // 2. RUNTIME CONFIGURATION FOR API KEYS & PROVIDERS
@@ -53,7 +53,7 @@ let runtimeConfig = {
     tier: 'free'
 };
 
-// State Otonom Backend (Session, Emergency Stop, Scheduler, News Guard Cache)
+// State Otonom Backend
 let BackendState = {
     isRunning: true,
     econCalendarFilterActive: true,
@@ -66,10 +66,8 @@ let BackendState = {
     lastNewsFetchTime: 0
 };
 
-// Penyimpanan State Cooldown di Sisi Server (Mencegah Spam Sinyal WebSocket)
 const backendLastSignalRecord = {};
 
-// Fungsi memuat ulang konfigurasi Global API Keys dari Firebase saat server menyala
 async function loadGlobalConfigFromFirebase() {
     try {
         if (db) {
@@ -112,9 +110,7 @@ function formatSymbolForProvider(cleanSymbol, provider) {
     return cleanSymbol;
 }
 
-// ============================================================================
-// MODUL PENGAMAN: FOREX FACTORY PUBLIC ECONOMIC CALENDAR (FREE & NO API KEY)
-// ============================================================================
+// MODUL PENGAMAN: FOREX FACTORY PUBLIC ECONOMIC CALENDAR (Jendela 30 Menit)
 async function fetchAndCacheEconomicCalendar() {
     let now = Date.now();
     if (now - BackendState.lastNewsFetchTime < 14400000 && BackendState.cachedNewsEvents.length > 0) {
@@ -158,20 +154,15 @@ async function isHighImpactNewsBlackout() {
     return false;
 }
 
-// ============================================================================
-// HELPER: Mengambil Cache Makro M30 (400 Candle) dari Firestore 
-// (Disesuaikan selaras dengan struktur penyimpanan fetch-candles.js)
-// ============================================================================
+// MACRO CACHE M30 DARI FIRESTORE
 async function getMacroCache400(pairSymbol) {
     try {
         if (db) {
-            // Mengambil dari dokumen terpusat 'latest_m30' pada koleksi 'macro_candles'
             let docSnap = await db.collection('macro_candles').doc('latest_m30').get();
             if (docSnap.exists) {
                 let data = docSnap.data();
                 let cleanSym = (pairSymbol || "").toUpperCase();
                 
-                // Mengambil array candle dari objek candles berdasarkan key pair (XAUUSD, GBPJPY, EURUSD)
                 if (data.candles && Array.isArray(data.candles[cleanSym]) && data.candles[cleanSym].length > 0) {
                     return data.candles[cleanSym].slice(-400);
                 }
@@ -184,50 +175,108 @@ async function getMacroCache400(pairSymbol) {
 }
 
 // ============================================================================
-// 3. MESIN INSTITUSIONAL: XAUUSDInstitutionalEngine (TOP-DOWN M30 -> M15 -> M5)
+// SISTEM RACING (BALAPAN PROVIDER): TWELVE DATA VS FINNHUB VS ALPHA VANTAGE
 // ============================================================================
+async function fetchCandlesWithRacing(pairSymbol, timeframeMinutes) {
+    let cleanSymbol = pairSymbol.toUpperCase();
+    let intervalParam = timeframeMinutes === 15 ? '15min' : '5min';
+    let resolutionParam = timeframeMinutes === 15 ? '15' : '5';
+
+    // 1. Task Twelve Data
+    const taskTwelve = (async () => {
+        let activeKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY;
+        if (!activeKey) throw new Error("Twelve Data key kosong");
+        let formattedSym = formatSymbolForProvider(cleanSymbol, 'twelveData');
+        let url = `${PROVIDERS.twelveData.baseUrl}/time_series?symbol=${encodeURIComponent(formattedSym)}&interval=${intervalParam}&outputsize=200&apikey=${activeKey}`;
+        let res = await axios.get(url, { timeout: 6000 });
+        let data = res.data;
+        if (data && data.values && Array.isArray(data.values)) {
+            let candles = data.values.reverse().map(item => [
+                new Date(item.datetime).getTime(),
+                parseFloat(item.open), parseFloat(item.high), parseFloat(item.low), parseFloat(item.close), parseFloat(item.volume || 100)
+            ]);
+            if (candles.length > 0) return { provider: 'TwelveData', candles };
+        }
+        throw new Error("Twelve Data format invalid");
+    })();
+
+    // 2. Task Finnhub
+    const taskFinnhub = (async () => {
+        let apiKey = runtimeConfig.finnhubKey || process.env.FINNHUB_KEY;
+        if (!apiKey) throw new Error("Finnhub key kosong");
+        let isFx = cleanSymbol.length === 6 || cleanSymbol.includes('XAU');
+        let finnhubSym = cleanSymbol.includes('XAU') ? 'XAU_USD' : cleanSymbol;
+        let now = Math.floor(Date.now() / 1000);
+        let fromTime = now - (5 * 24 * 60 * 60); 
+        let url = isFx 
+            ? `${PROVIDERS.finnhub.baseUrl}/forex/candle?symbol=OANDA:${finnhubSym}&resolution=${resolutionParam}&from=${fromTime}&to=${now}&token=${apiKey}`
+            : `${PROVIDERS.finnhub.baseUrl}/stock/candle?symbol=${cleanSymbol}&resolution=${resolutionParam}&from=${fromTime}&to=${now}&token=${apiKey}`;
+        let res = await axios.get(url, { timeout: 6000 });
+        let data = res.data;
+        if (data && data.s === 'ok' && Array.isArray(data.t)) {
+            let candles = data.t.map((t, idx) => [
+                t * 1000,
+                parseFloat(data.o[idx]), parseFloat(data.h[idx]), parseFloat(data.l[idx]), parseFloat(data.c[idx]), parseFloat(data.v[idx] || 100)
+            ]);
+            if (candles.length > 0) return { provider: 'Finnhub', candles };
+        }
+        throw new Error("Finnhub format invalid");
+    })();
+
+    // 3. Task Alpha Vantage
+    const taskAlpha = (async () => {
+        let apiKey = runtimeConfig.alphaVantageKey || process.env.ALPHA_VANTAGE_KEY;
+        if (!apiKey) throw new Error("Alpha Vantage key kosong");
+        let isFx = cleanSymbol.length === 6 || cleanSymbol.includes('XAU');
+        let base = cleanSymbol.slice(0, 3);
+        let quote = cleanSymbol.slice(3);
+        if (cleanSymbol.includes('XAU')) { base = 'XAU'; quote = 'USD'; }
+        let url = isFx
+            ? `${PROVIDERS.alphaVantage.baseUrl}?function=FX_INTRADAY&from_symbol=${base}&to_symbol=${quote}&interval=${intervalParam}&outputsize=full&apikey=${apiKey}`
+            : `${PROVIDERS.alphaVantage.baseUrl}?function=TIME_SERIES_INTRADAY&symbol=${cleanSymbol}&interval=${intervalParam}&outputsize=full&apikey=${apiKey}`;
+        let res = await axios.get(url, { timeout: 7000 });
+        let data = res.data;
+        let timeSeriesKey = Object.keys(data).find(k => k.includes('Time Series'));
+        if (timeSeriesKey && data[timeSeriesKey]) {
+            let tsData = data[timeSeriesKey];
+            let candles = Object.entries(tsData).map(([timestamp, vals]) => [
+                new Date(timestamp).getTime(),
+                parseFloat(vals['1. open']), parseFloat(vals['2. high']), parseFloat(vals['3. low']), parseFloat(vals['4. close']), parseFloat(vals['5. volume'] || 100)
+            ]).sort((a, b) => a[0] - b[0]);
+            if (candles.length > 0) return { provider: 'AlphaVantage', candles };
+        }
+        throw new Error("Alpha Vantage format invalid");
+    })();
+
+    // RACING EXECUTOR: Siapa yang menang (selesai paling cepat tanpa error) diambil!
+    try {
+        let winner = await Promise.any([taskTwelve, taskFinnhub, taskAlpha]);
+        console.log(`[Provider Racing] Pemenang tercepat untuk ${cleanSymbol} (${timeframeMinutes}m): ${winner.provider}`);
+        return winner.candles;
+    } catch (aggregateError) {
+        console.error(`[Provider Racing Error] Semua provider gagal merespons untuk ${cleanSymbol}:`, aggregateError.errors);
+        return [];
+    }
+}
+
+// MESIN INSTITUSIONAL
 async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
     if (!BackendState.isRunning) {
-        console.log('[Engine] Sistem dalam status Emergency Stop (Kill Switch Aktif).');
         return null;
     }
 
-    console.log(`[Engine WSM-200] Menjalankan analisis Hierarki M30 -> M15 -> M5 untuk ${pairSymbol}...`);
-
     try {
-        let activeKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY || "demo";
-        let formattedSym = formatSymbolForProvider(pairSymbol, 'twelveData');
+        let [m15Candles, m5Candles] = await Promise.all([
+            fetchCandlesWithRacing(pairSymbol, 15),
+            fetchCandlesWithRacing(pairSymbol, 5)
+        ]);
 
-        // Ambil data taktis M15 (200 candle untuk SNR) & M5 (30 candle untuk eksekusi presisi) secara pararel
-        let urlM15 = `${PROVIDERS.twelveData.baseUrl}/time_series?symbol=${formattedSym}&interval=15min&outputsize=200&apikey=${activeKey}`;
-        let urlM5 = `${PROVIDERS.twelveData.baseUrl}/time_series?symbol=${formattedSym}&interval=5min&outputsize=30&apikey=${activeKey}`;
-
-        let [resM15, resM5] = await Promise.all([axios.get(urlM15), axios.get(urlM5)]);
-        
-        let m15Candles = [];
-        if (resM15.data && resM15.data.values && Array.isArray(resM15.data.values)) {
-            m15Candles = resM15.data.values.reverse().map(item => [
-                new Date(item.datetime).getTime(),
-                parseFloat(item.open), parseFloat(item.high), parseFloat(item.low), parseFloat(item.close), parseFloat(item.volume || 100)
-            ]);
-        }
-
-        let m5Candles = [];
-        if (resM5.data && resM5.data.values && Array.isArray(resM5.data.values)) {
-            m5Candles = resM5.data.values.reverse().map(item => [
-                new Date(item.datetime).getTime(),
-                parseFloat(item.open), parseFloat(item.high), parseFloat(item.low), parseFloat(item.close), parseFloat(item.volume || 100)
-            ]);
-        }
-
-        // Ambil 400 candle M30 Makro langsung dari Local Storage Firebase
         let m30MacroCandles = await getMacroCache400(pairSymbol);
 
         if (m15Candles.length < 50 || m30MacroCandles.length < 50 || m5Candles.length < 10) {
-            return { status: 'NO_SIGNAL', reason: 'Data multi-timeframe belum lengkap dari provider / Firebase.' };
+            return { status: 'NO_SIGNAL', reason: 'Data multi-timeframe belum lengkap.' };
         }
 
-        // Masukkan ke Mesin Evaluasi Hierarki Utama (Top-Down + TP-First + 180° Mirror SL)
         let signalResult = evaluateWSM200InstitutionalStrategy(m30MacroCandles, m15Candles, m5Candles, pairSymbol);
 
         if (signalResult && signalResult.status === 'TRIGGERED') {
@@ -237,7 +286,7 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
             let lastStratRecord = backendLastSignalRecord[stratContextKey];
 
             if (lastStratRecord && currentCandleTime <= lastStratRecord.candleTime) {
-                return { status: 'NO_SIGNAL', reason: 'Sinyal pada candle ini sudah pernah dieksekusi.' };
+                return { status: 'NO_SIGNAL' };
             }
 
             backendLastSignalRecord[stratContextKey] = {
@@ -248,24 +297,19 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
         }
 
         return signalResult;
-
     } catch (e) {
         console.error('[Engine Pipeline Error]:', e.message);
         return null;
     }
 }
 
-// ============================================================================
-// MESIN WSM-200: M30 BIAS -> M15 SNR ANCHOR -> M5 ENTRY & 180° MIRROR SL
-// ============================================================================
 function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, pairSymbol) {
     let cleanSym = (pairSymbol || "").toUpperCase();
     let isGold = cleanSym.includes("XAU") || cleanSym.includes("GOLD");
-    if (!isGold) return { status: 'NO_SIGNAL', reason: 'Modul khusus instrumen XAUUSD.' };
+    if (!isGold) return { status: 'NO_SIGNAL' };
 
     let currentPrice = candlesM5[candlesM5.length - 1][4];
 
-    // Lapis 1: M30 Macro Bias & Dealing Range (Discount vs Premium)
     let m30Sample = candlesM30.slice(-400);
     let m30High = Math.max(...m30Sample.map(c => c[2]));
     let m30Low = Math.min(...m30Sample.map(c => c[3]));
@@ -273,7 +317,6 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
     let macroBias = currentPrice < m30Equilibrium ? 'DISCOUNT_BUY' : 'PREMIUM_SELL';
 
-    // Lapis 2: M15 Structural Anchor (SNR & Dealing Range)
     let m15Sample = candlesM15.slice(-200);
     let m15Supports = [];
     let m15Resistances = [];
@@ -289,7 +332,6 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         }
     }
 
-    // Lapis 3: M5 Precision Execution & Zone Validation
     let actionType = null;
     let targetSupport = null;
     let targetResistance = null;
@@ -316,12 +358,11 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     }
 
     if (!actionType) {
-        return { status: 'NO_SIGNAL', reason: 'Menunggu harga masuk zona struktur SNR M15 terkonfirmasi M5.' };
+        return { status: 'NO_SIGNAL' };
     }
 
-    // Kalkulasi TP First & 180° Mirror SL (Anti-Stop-Hunt)
     let entryPrice = currentPrice;
-    let minNetPipDistance = 1.8; // 18 pips x 0.1 = 1.8 USD bersih
+    let minNetPipDistance = 1.8; 
     let spreadAndBuffer = 0.5;   
     let sl = 0;
     let tp1 = 0, tp2 = null, tp3 = null;
@@ -341,10 +382,9 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
         let netPipCheck = Math.abs(tp1 - entryPrice);
         if (netPipCheck < minNetPipDistance) {
-            return { status: 'NO_SIGNAL', reason: 'Ditolak: Jarak TP1 kurang dari minimum 18 pip bersih.' };
+            return { status: 'NO_SIGNAL' };
         }
 
-        // Proyeksi 180 Derajat ke Bawah untuk SL (Anti-Stop-Hunt)
         let upwardSpan = Math.abs(tp1 - entryPrice);
         sl = Number((entryPrice - upwardSpan).toFixed(2));
 
@@ -362,10 +402,9 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
         let netPipCheck = Math.abs(entryPrice - tp1);
         if (netPipCheck < minNetPipDistance) {
-            return { status: 'NO_SIGNAL', reason: 'Ditolak: Jarak TP1 kurang dari minimum 18 pip bersih.' };
+            return { status: 'NO_SIGNAL' };
         }
 
-        // Proyeksi 180 Derajat ke Atas untuk SL (Anti-Stop-Hunt)
         let downwardSpan = Math.abs(entryPrice - tp1);
         sl = Number((entryPrice + downwardSpan).toFixed(2));
     }
@@ -391,9 +430,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     };
 }
 
-// ============================================================================
-// 4. REST API ENDPOINTS
-// ============================================================================
+// REST API ENDPOINTS (Kompatibel Penuh dengan Frontend)
 app.get('/api/macro/latest', async (req, res) => {
     try {
         if (!db) return res.status(500).json({ success: false, message: 'Firestore belum diinisialisasi.' });
@@ -408,11 +445,11 @@ app.get('/api/macro/latest', async (req, res) => {
 app.post('/api/verify-dev', (req, res) => {
     const { password } = req.body;
     const devPassword = process.env.DEV_PASSWORD;
-    if (!devPassword) return res.status(500).json({ success: false, message: "DEV_PASSWORD belum diatur di Render." });
+    if (!devPassword) return res.status(500).json({ success: false, message: "DEV_PASSWORD belum diatur." });
     if (password && password.trim() === devPassword) {
-        return res.json({ success: true, message: "Akses diverifikasi." });
+        return res.json({ success: true });
     }
-    return res.status(401).json({ success: false, message: "Sandi pengembang salah." });
+    return res.status(401).json({ success: false });
 });
 
 app.post('/api/developer/config', async (req, res) => {
@@ -445,7 +482,7 @@ app.post('/api/developer/config', async (req, res) => {
             await db.collection('settings').doc('global_config').set(firestoreUpdate, { merge: true });
         }
 
-        return res.json({ success: true, message: "Konfigurasi diperbarui dengan aman!" });
+        return res.json({ success: true });
     } catch (error) {
         return res.status(500).json({ success: false, error: error.message });
     }
@@ -464,7 +501,7 @@ app.post('/api/validate-symbol', (req, res) => {
     if (MASTER_WHITELIST.includes(cleanSymbol)) {
         return res.json({ valid: true, symbol: cleanSymbol });
     }
-    return res.status(400).json({ valid: false, message: `Instrumen '${cleanSymbol}' ditolak whitelist.` });
+    return res.status(400).json({ valid: false });
 });
 
 app.get('/api/proxy/candles', async (req, res) => {
@@ -497,10 +534,10 @@ app.get('/api/proxy/candles', async (req, res) => {
             const response = await axios.get(targetUrl);
             return res.json(response.data);
         } else {
-            return res.status(400).json({ success: false, message: "Provider proxy tidak dikenal" });
+            return res.status(400).json({ success: false });
         }
     } catch (error) {
-        return res.status(500).json({ success: false, isInvalidSymbol: false, message: error.message });
+        return res.status(500).json({ success: false, message: error.message });
     }
 });
 
@@ -509,7 +546,7 @@ app.get('/api/v1/market', async (req, res) => {
     const cleanSymbol = (symbol || "").trim().toUpperCase();
 
     if (!MASTER_WHITELIST.includes(cleanSymbol)) {
-        return res.status(403).json({ error: "Access Denied", message: "Simbol tidak ada di Katalog Master Whitelist." });
+        return res.status(403).json({ error: "Access Denied" });
     }
 
     const cacheKey = `${provider}_${cleanSymbol}_${interval}`;
@@ -534,7 +571,7 @@ app.get('/api/v1/market', async (req, res) => {
         } else if (provider === 'alphaVantage') {
             const activeKey = runtimeConfig.alphaVantageKey || process.env.ALPHA_VANTAGE_KEY || "demo";
             const isDaily = ['240', 'D', 'W', 'M'].includes(interval);
-            const functionType = isDaily ? 'TIME_SERIES_DAILY' : 'TIME_SERISS_INTRADAY';
+            const functionType = isDaily ? 'TIME_SERIES_DAILY' : 'TIME_SERIES_INTRADAY';
             const intervalParam = isDaily ? '' : `&interval=${interval}`;
             const url = `${PROVIDERS.alphaVantage.baseUrl}?function=${functionType}&symbol=${formattedSymbol}${intervalParam}&apikey=${activeKey}`;
             const response = await axios.get(url);
@@ -552,33 +589,27 @@ app.get('/api/v1/market', async (req, res) => {
 
 app.post('/api/sync', (req, res) => {
     const tradeRecord = req.body;
-    return res.json({ success: true, message: 'Disinkronkan ke server.', data: tradeRecord });
+    return res.json({ success: true, data: tradeRecord });
 });
 
-// ============================================================================
-// 5. JALUR DISTRIBUSI SINYAL BERBASIS TIER (PIPELINE)
-// ============================================================================
+// TIER PIPELINE
 function routeSignalThroughTierPipeline(signalData, clientTier) {
     if (clientTier === 'free' || !clientTier) {
-        return { ...signalData, tierTarget: 'STANDARD', allowed: true, note: 'Dialirkan ke jalur Standar Tier' };
+        return { ...signalData, tierTarget: 'STANDARD', allowed: true };
     } 
     else if (clientTier === 'premium' || clientTier === 'vip') {
-        return { ...signalData, tierTarget: 'PREMIUM', allowed: true, note: 'Dialirkan ke jalur Premium Tier (Full Access)' };
+        return { ...signalData, tierTarget: 'PREMIUM', allowed: true };
     }
     return null;
 }
 
-// ============================================================================
-// 6. WEBSOCKET SERVER
-// ============================================================================
+// WEBSOCKET SERVER
 wss.on('connection', (ws) => {
-    console.log('[WebSocket Backend] Klien Panel Developer terhubung secara aktif.');
     ws.tier = 'free';
 
     ws.on('message', async (message) => {
         try {
             const parsed = JSON.parse(message);
-            console.log(`[WebSocket Backend] Menerima aksi kendali: ${parsed.action || parsed.type}`);
 
             if (parsed.tier) {
                 ws.tier = parsed.tier;
@@ -595,24 +626,18 @@ wss.on('connection', (ws) => {
             } 
             else if (parsed.action === 'EMERGENCY_STOP' || parsed.type === 'EMERGENCY_STOP') {
                 BackendState.isRunning = false;
-                ws.send(JSON.stringify({ type: 'SYSTEM_STATUS', message: 'Emergency Stop berhasil diterapkan di server.' }));
+                ws.send(JSON.stringify({ type: 'SYSTEM_STATUS', message: 'Emergency Stop aktif.' }));
             } 
             else {
                 ws.send(JSON.stringify({ status: 'ack', payload: parsed }));
             }
         } catch (e) {
-            ws.send(JSON.stringify({ error: 'Format pesan WebSocket tidak valid.' }));
+            ws.send(JSON.stringify({ error: 'Format tidak valid.' }));
         }
-    });
-
-    ws.on('close', () => {
-        console.log('[WebSocket Backend] Klien Panel Developer terputus.');
     });
 });
 
-// ============================================================================
-// 7. AUTONOMOUS BACKGROUND SCHEDULER & WORKER (INTERVAL 3.75 MENIT / 225000MS)
-// ============================================================================
+// AUTONOMOUS SCHEDULER
 function isWeekend() {
     const now = new Date();
     const day = now.getDay();
@@ -644,7 +669,6 @@ setInterval(async () => {
     try {
         let inNewsBlackout = await isHighImpactNewsBlackout();
         if (inNewsBlackout) {
-            console.log('[News Guard] Sinyal XAUUSD ditahan sementara karena ada rilis High-Impact News USD.');
             return;
         }
 
@@ -652,8 +676,6 @@ setInterval(async () => {
         let signalResult = await runInstitutionalEnginePipeline(targetSymbol, "15");
 
         if (signalResult && signalResult.status === 'TRIGGERED') {
-            console.log(`[Autonomous Engine] Sinyal WSM-200 & 180° Mirror SL Valid! Menyiarkan sinyal ${targetSymbol} via WebSocket.`);
-            
             wss.clients.forEach(client => {
                 if (client.readyState === WebSocket.OPEN) {
                     let userTier = client.tier || 'free';
@@ -673,10 +695,8 @@ setInterval(async () => {
     }
 }, AUTONOMOUS_INTERVAL_MS);
 
-// ============================================================================
 // SERVER LISTEN
-// ============================================================================
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`HybriOX Autonomous Backend & Proxy aktif dan berjalan pada port ${PORT}`);
+    console.log(`HybriOX Autonomous Backend aktif (dengan Sistem Racing) pada port ${PORT}`);
 });
