@@ -174,16 +174,19 @@ async function getMacroCache400(pairSymbol) {
     return [];
 }
 
-// ============================================================================
-// SISTEM RACING (BALAPAN PROVIDER): TWELVE DATA VS FINNHUB VS ALPHA VANTAGE
-// ============================================================================
-async function fetchCandlesWithRacing(pairSymbol, timeframeMinutes) {
+// Fungsi pembantu untuk memberikan jeda waktu (delay)
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// =============================
+// SISTEM RACING + SAFE RETRY 
+// =============================
+async function fetchCandlesWithRacing(pairSymbol, timeframeMinutes, maxRetries = 2) {
     let cleanSymbol = pairSymbol.toUpperCase();
     let intervalParam = timeframeMinutes === 15 ? '15min' : '5min';
     let resolutionParam = timeframeMinutes === 15 ? '15' : '5';
 
     // 1. Task Twelve Data
-    const taskTwelve = (async () => {
+    const taskTwelve = async () => {
         let activeKey = runtimeConfig.twelveApiKey || process.env.TWELVE_DATA_API_KEY;
         if (!activeKey) throw new Error("Twelve Data key kosong");
         let formattedSym = formatSymbolForProvider(cleanSymbol, 'twelveData');
@@ -198,10 +201,10 @@ async function fetchCandlesWithRacing(pairSymbol, timeframeMinutes) {
             if (candles.length > 0) return { provider: 'TwelveData', candles };
         }
         throw new Error("Twelve Data format invalid");
-    })();
+    };
 
     // 2. Task Finnhub
-    const taskFinnhub = (async () => {
+    const taskFinnhub = async () => {
         let apiKey = runtimeConfig.finnhubKey || process.env.FINNHUB_KEY;
         if (!apiKey) throw new Error("Finnhub key kosong");
         let isFx = cleanSymbol.length === 6 || cleanSymbol.includes('XAU');
@@ -221,10 +224,10 @@ async function fetchCandlesWithRacing(pairSymbol, timeframeMinutes) {
             if (candles.length > 0) return { provider: 'Finnhub', candles };
         }
         throw new Error("Finnhub format invalid");
-    })();
+    };
 
     // 3. Task Alpha Vantage
-    const taskAlpha = (async () => {
+    const taskAlpha = async () => {
         let apiKey = runtimeConfig.alphaVantageKey || process.env.ALPHA_VANTAGE_KEY;
         if (!apiKey) throw new Error("Alpha Vantage key kosong");
         let isFx = cleanSymbol.length === 6 || cleanSymbol.includes('XAU');
@@ -246,17 +249,26 @@ async function fetchCandlesWithRacing(pairSymbol, timeframeMinutes) {
             if (candles.length > 0) return { provider: 'AlphaVantage', candles };
         }
         throw new Error("Alpha Vantage format invalid");
-    })();
+    };
 
-    // RACING EXECUTOR: Siapa yang menang (selesai paling cepat tanpa error) diambil!
-    try {
-        let winner = await Promise.any([taskTwelve, taskFinnhub, taskAlpha]);
-        console.log(`[Provider Racing] Pemenang tercepat untuk ${cleanSymbol} (${timeframeMinutes}m): ${winner.provider}`);
-        return winner.candles;
-    } catch (aggregateError) {
-        console.error(`[Provider Racing Error] Semua provider gagal merespons untuk ${cleanSymbol}:`, aggregateError.errors);
-        return [];
+    // Mekanisme Perulangan (Retry) dengan Jeda Aman
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            let winner = await Promise.any([taskTwelve(), taskFinnhub(), taskAlpha()]);
+            if (winner && winner.candles && winner.candles.length > 0) {
+                console.log(`[Provider Racing] Sukses (Percobaan ${attempt}) untuk ${cleanSymbol} (${timeframeMinutes}m) via: ${winner.provider}`);
+                return winner.candles;
+            }
+        } catch (aggregateError) {
+            console.warn(`[Provider Racing Warning] Percobaan ${attempt}/${maxRetries} gagal total untuk ${cleanSymbol}. Menunggu jarak aman 3 detik...`);
+            if (attempt < maxRetries) {
+                await delay(3000); // Jeda aman 3 detik sebelum mencoba balapan ulang
+            }
+        }
     }
+
+    console.error(`[Provider Racing Critical] Semua percobaan (${maxRetries}x) gagal untuk ${cleanSymbol}. Sinyal ditahan demi keamanan.`);
+    return []; // Mengembalikan array kosong (TIDAK ADA FALLBACK KE DEMO)
 }
 
 // MESIN INSTITUSIONAL
@@ -310,13 +322,14 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
     let currentPrice = candlesM5[candlesM5.length - 1][4];
 
+    // 1. M30: Bias Tren Makro
     let m30Sample = candlesM30.slice(-400);
     let m30High = Math.max(...m30Sample.map(c => c[2]));
     let m30Low = Math.min(...m30Sample.map(c => c[3]));
     let m30Equilibrium = (m30High + m30Low) / 2;
-
     let macroBias = currentPrice < m30Equilibrium ? 'DISCOUNT_BUY' : 'PREMIUM_SELL';
 
+    // 2. M15: Peta Struktur SNR
     let m15Sample = candlesM15.slice(-200);
     let m15Supports = [];
     let m15Resistances = [];
@@ -337,6 +350,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     let targetResistance = null;
     let zoneThreshold = 4.0;
 
+    // 3. M5: Titik Eksekusi Presisi (Wick mendekati struktur M15)
     if (macroBias === 'DISCOUNT_BUY') {
         let validSupports = m15Supports.filter(s => s < currentPrice);
         if (validSupports.length > 0) {
@@ -362,51 +376,51 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     }
 
     let entryPrice = currentPrice;
-    let minNetPipDistance = 1.8; 
-    let spreadAndBuffer = 0.5;   
+    
+    // PEMISAHAN PARAMETER BUFFER & TARGET
+    let minNetProfitUSD = 2.0;    // Target dasar jarak harga minimum untuk TP1 ($2.00 / 200 pip platform)
+    let slStructuralBuffer = 1.5; // Buffer tebal khusus SL ($1.50) untuk menahan jilatan wick/noise broker
+    let tpSpreadBuffer = 0.5;     // Buffer tipis untuk TP ($0.50) agar cepat tercapai & aman dari spread
+    
     let sl = 0;
     let tp1 = 0, tp2 = null, tp3 = null;
     let tpCount = 1;
 
     if (actionType === 'BUY_LIMIT') {
+        // SL dikunci di bawah Support M15 dengan buffer tebal ($1.50) agar aman dari stop hunting
+        let baseSupport = targetSupport !== null ? targetSupport : (entryPrice - 2.0);
+        sl = Number((baseSupport - slStructuralBuffer).toFixed(2));
+
+        // TP dicari dari Resistance M15 dengan buffer tipis ($0.50) agar cepat tereksekusi
         let upperResistances = m15Resistances.filter(r => r > entryPrice).sort((a, b) => a - b);
-        let rawTp1 = entryPrice + minNetPipDistance + spreadAndBuffer;
+        let rawMinTp = entryPrice + minNetProfitUSD + tpSpreadBuffer;
 
         if (upperResistances.length > 0) {
-            tp1 = Number(Math.max(rawTp1, upperResistances[0] * 0.98).toFixed(2));
+            let structuralTp = upperResistances[0];
+            tp1 = Number(Math.max(rawMinTp, structuralTp).toFixed(2));
             if (upperResistances.length > 1) { tp2 = Number(upperResistances[1].toFixed(2)); tpCount = 2; }
             if (upperResistances.length > 2) { tp3 = Number(upperResistances[2].toFixed(2)); tpCount = 3; }
         } else {
-            tp1 = Number(rawTp1.toFixed(2));
+            tp1 = Number(rawMinTp.toFixed(2));
         }
-
-        let netPipCheck = Math.abs(tp1 - entryPrice);
-        if (netPipCheck < minNetPipDistance) {
-            return { status: 'NO_SIGNAL' };
-        }
-
-        let upwardSpan = Math.abs(tp1 - entryPrice);
-        sl = Number((entryPrice - upwardSpan).toFixed(2));
 
     } else {
+        // SL dikunci di atas Resistance M15 dengan buffer tebal ($1.50)
+        let baseResistance = targetResistance !== null ? targetResistance : (entryPrice + 2.0);
+        sl = Number((baseResistance + slStructuralBuffer).toFixed(2));
+
+        // TP dicari dari Support M15 dengan buffer tipis ($0.50) agar cepat tercapai
         let lowerSupports = m15Supports.filter(s => s < entryPrice).sort((a, b) => b - a);
-        let rawTp1 = entryPrice - minNetPipDistance - spreadAndBuffer;
+        let rawMinTp = entryPrice - minNetProfitUSD - tpSpreadBuffer;
 
         if (lowerSupports.length > 0) {
-            tp1 = Number(Math.min(rawTp1, lowerSupports[0] * 1.02).toFixed(2));
+            let structuralTp = lowerSupports[0];
+            tp1 = Number(Math.min(rawMinTp, structuralTp).toFixed(2));
             if (lowerSupports.length > 1) { tp2 = Number(lowerSupports[1].toFixed(2)); tpCount = 2; }
             if (lowerSupports.length > 2) { tp3 = Number(lowerSupports[2].toFixed(2)); tpCount = 3; }
         } else {
-            tp1 = Number(rawTp1.toFixed(2));
+            tp1 = Number(rawMinTp.toFixed(2));
         }
-
-        let netPipCheck = Math.abs(entryPrice - tp1);
-        if (netPipCheck < minNetPipDistance) {
-            return { status: 'NO_SIGNAL' };
-        }
-
-        let downwardSpan = Math.abs(entryPrice - tp1);
-        sl = Number((entryPrice + downwardSpan).toFixed(2));
     }
 
     return {
@@ -414,7 +428,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         pair: pairSymbol,
         timeframe: 'M30->M15->M5',
         status: 'TRIGGERED',
-        strategyName: 'WSM-200 Gold Sniper (Top-Down M30/M15/M5 + 180° Mirror SL)',
+        strategyName: 'WSM-200 Gold Sniper (M30 Bias + M15 SNR Structure + M5 Wick Execution)',
         actionType: actionType,
         price: Number(entryPrice.toFixed(2)),
         entryZone: Number(entryPrice.toFixed(2)),
