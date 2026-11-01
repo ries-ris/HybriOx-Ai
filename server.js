@@ -1,8 +1,8 @@
 /**
- * HybriOX Professional-Grade Backend Proxy & Asset Management Server
+ * HybriOX Professional-Grade Backend Proxy & Asset Management Server (Final Master Version)
  * - Full Multi-Provider Support & High-Speed Racing Architecture (Twelve Data vs Finnhub vs Alpha Vantage)
  * - Strict Master Registry Whitelist (Authorized Instruments)
- * - XAUUSDInstitutionalEngine (Top-Down M30 -> M15 -> M5 & Hybrid SL Buffer for Long Wicks)
+ * - XAUUSDInstitutionalEngine (Top-Down M30 -> M15 -> M5 & Hybrid SL Buffer + Min 180 Pips TP)
  * - Autonomous Forex Factory News Guard (High-Impact USD Filter - 30 Min Window)
  * - Tier Distribution Pipeline & WebSocket Integration (Dengan Dukungan Developer Mode)
  * - ES Module Syntax (Compatible with package.json "type": "module")
@@ -325,7 +325,6 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     let currentPrice = candlesM5[candlesM5.length - 1][4];
 
     let m30Sample = candlesM30.slice(-400);
-    // Proteksi Array Kosong untuk Produksi
     let m30High = m30Sample.length > 0 ? Math.max(...m30Sample.map(c => c[2])) : currentPrice;
     let m30Low = m30Sample.length > 0 ? Math.min(...m30Sample.map(c => c[3])) : currentPrice;
     let m30Equilibrium = (m30High + m30Low) / 2;
@@ -376,10 +375,9 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     }
 
     let entryPrice = currentPrice;
-    let minNetProfitUSD = 2.0;
     let tpSpreadBuffer = 0.5;
 
-    // --- KALKULASI HYBRID BUFFER SL KHUSUS XAUUSD ---
+    // --- KALKULASI HYBRID SL BUFFER KHUSUS XAUUSD (Floor 1.5 + ATR Clamp 7.5 s.d 20) ---
     let trList = [];
     for (let i = 1; i < candlesM5.length; i++) {
         let high = candlesM5[i][2], low = candlesM5[i][3], prevClose = candlesM5[i - 1][4];
@@ -387,11 +385,12 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     }
     let baseAtr = trList.length >= 14 ? (trList.slice(-14).reduce((a, b) => a + b, 0) / 14) : (currentPrice * 0.001);
     
-    // Menggunakan minimal 1.5 (floor) atau mengikuti 0.75 dari ATR (diambil yang terbesar)
-    let goldStructuralBuffer = Math.max(1.5, baseAtr * 0.75);
-    // ----------------------------------------------
+    let clampedAtr = Math.max(7.5, Math.min(20, baseAtr * 0.75));
+    let goldStructuralBuffer = Math.max(1.5, clampedAtr);
+    // ---------------------------------------------------------------------------------
 
     let sl = 0;
+    let rawTargets = [];
     let tp1 = 0, tp2 = null, tp3 = null;
     let tpCount = 1;
 
@@ -399,43 +398,54 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         let baseSupport = targetSupport !== null ? targetSupport : (entryPrice - 2.0);
         sl = Number((baseSupport - goldStructuralBuffer).toFixed(2));
         let upperResistances = m15Resistances.filter(r => r > entryPrice).sort((a, b) => a - b);
-        let rawMinTp = entryPrice + minNetProfitUSD + tpSpreadBuffer;
-
+        
         if (upperResistances.length > 0) {
-            let structuralTp = upperResistances[0];
-            tp1 = Number(Math.max(rawMinTp, structuralTp).toFixed(2));
-            if (upperResistances.length > 1) { tp2 = Number(upperResistances[1].toFixed(2)); tpCount = 2; }
-            if (upperResistances.length > 2) { tp3 = Number(upperResistances[2].toFixed(2)); tpCount = 3; }
+            rawTargets = upperResistances;
         } else {
-            tp1 = Number(rawMinTp.toFixed(2));
+            rawTargets = [entryPrice + 20.0];
         }
     } else {
         let baseResistance = targetResistance !== null ? targetResistance : (entryPrice + 2.0);
         sl = Number((baseResistance + goldStructuralBuffer).toFixed(2));
         let lowerSupports = m15Supports.filter(s => s < entryPrice).sort((a, b) => b - a);
-        let rawMinTp = entryPrice - minNetProfitUSD - tpSpreadBuffer;
 
         if (lowerSupports.length > 0) {
-            let structuralTp = lowerSupports[0];
-            tp1 = Number(Math.min(rawMinTp, structuralTp).toFixed(2));
-            if (lowerSupports.length > 1) { tp2 = Number(lowerSupports[1].toFixed(2)); tpCount = 2; }
-            if (lowerSupports.length > 2) { tp3 = Number(lowerSupports[2].toFixed(2)); tpCount = 3; }
+            rawTargets = lowerSupports;
         } else {
-            tp1 = Number(rawMinTp.toFixed(2));
+            rawTargets = [entryPrice - 20.0];
         }
     }
+
+    // --- ATURAN KAKU GATE 4: MINIMUM 180 PIPS BERSIH UNTUK TP ---
+    let validTargets = [];
+    for (let targetPrice of rawTargets) {
+        let distancePips = Math.abs(targetPrice - entryPrice) * 10;
+        if (distancePips >= 180) {
+            validTargets.push(targetPrice);
+        }
+    }
+
+    if (validTargets.length === 0) {
+        // Fallback otomatis jika struktur terdekat kurang dari 180 pips, paksakan minimal 18.00 (180 pips) dari entry
+        let fallbackTp = actionType === 'BUY_LIMIT' ? entryPrice + 18.0 : entryPrice - 18.0;
+        validTargets.push(Number(fallbackTp.toFixed(2)));
+    }
+
+    tp1 = validTargets[0] || null;
+    if (validTargets.length > 1) { tp2 = validTargets[1]; tpCount = 2; }
+    if (validTargets.length > 2) { tp3 = validTargets[2]; tpCount = 3; }
 
     return {
         signalId: 'WSM200_GOLD_' + Date.now(),
         pair: pairSymbol,
         timeframe: 'M30->M15->M5',
         status: 'TRIGGERED',
-        strategyName: 'WSM-200 Gold Sniper (M30 Bias + M15 SNR Structure + M5 Wick Hybrid Buffer)',
+        strategyName: 'WSM-200 Gold Sniper (Hybrid Buffer + Min 180 Pips TP)',
         actionType: actionType,
         price: Number(entryPrice.toFixed(2)),
         entryZone: Number(entryPrice.toFixed(2)),
         sl: sl,
-        targets: [tp1, tp2, tp3].filter(Boolean),
+        targets: validTargets.filter(Boolean),
         tpCount: tpCount,
         tp1: tp1,
         tp2: tp2,
@@ -629,7 +639,7 @@ function routeSignalThroughTierPipeline(signalData, clientTier) {
     return null;
 }
 
-// WEBSOCKET SERVER DENGAN HEARTBEAT (PENGAMAN PRODUKSI)
+// WEBSOCKET SERVER DENGAN HEARTBEAT
 wss.on('connection', (ws) => {
     ws.tier = 'free';
     ws.isAlive = true;
@@ -668,7 +678,6 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Interval Heartbeat WebSocket (Mencegah putus koneksi di server cloud)
 const pingInterval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
@@ -739,7 +748,7 @@ setInterval(async () => {
     }
 }, AUTONOMOUS_INTERVAL_MS);
 
-// PENANGANAN ERROR GLOBAL PROSES (PENGAMAN PRODUKSI)
+// PENANGANAN ERROR GLOBAL PROSES
 process.on('unhandledRejection', (reason) => {
     console.error('Unhandled Rejection terdeteksi:', reason);
 });
@@ -751,5 +760,5 @@ process.on('uncaughtException', (error) => {
 // SERVER LISTEN
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`HybriOX Autonomous Backend aktif (Hybrid Buffer Mode) pada port ${PORT}`);
+    console.log(`HybriOX Autonomous Backend aktif (Final Version) pada port ${PORT}`);
 });
