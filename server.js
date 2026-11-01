@@ -2,7 +2,7 @@
  * HybriOX Professional-Grade Backend Proxy & Asset Management Server
  * - Full Multi-Provider Support & High-Speed Racing Architecture (Twelve Data vs Finnhub vs Alpha Vantage)
  * - Strict Master Registry Whitelist (Authorized Instruments)
- * - XAUUSDInstitutionalEngine (Top-Down M30 -> M15 -> M5 & TP-First / 180° Mirror SL)
+ * - XAUUSDInstitutionalEngine (Top-Down M30 -> M15 -> M5 & Hybrid SL Buffer for Long Wicks)
  * - Autonomous Forex Factory News Guard (High-Impact USD Filter - 30 Min Window)
  * - Tier Distribution Pipeline & WebSocket Integration (Dengan Dukungan Developer Mode)
  * - ES Module Syntax (Compatible with package.json "type": "module")
@@ -377,16 +377,27 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
     let entryPrice = currentPrice;
     let minNetProfitUSD = 2.0;
-    let slStructuralBuffer = 1.5;
     let tpSpreadBuffer = 0.5;
+
+    // --- KALKULASI HYBRID BUFFER SL KHUSUS XAUUSD ---
+    let trList = [];
+    for (let i = 1; i < candlesM5.length; i++) {
+        let high = candlesM5[i][2], low = candlesM5[i][3], prevClose = candlesM5[i - 1][4];
+        trList.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
+    }
+    let baseAtr = trList.length >= 14 ? (trList.slice(-14).reduce((a, b) => a + b, 0) / 14) : (currentPrice * 0.001);
     
+    // Menggunakan minimal 1.5 (floor) atau mengikuti 0.75 dari ATR (diambil yang terbesar)
+    let goldStructuralBuffer = Math.max(1.5, baseAtr * 0.75);
+    // ----------------------------------------------
+
     let sl = 0;
     let tp1 = 0, tp2 = null, tp3 = null;
     let tpCount = 1;
 
     if (actionType === 'BUY_LIMIT') {
         let baseSupport = targetSupport !== null ? targetSupport : (entryPrice - 2.0);
-        sl = Number((baseSupport - slStructuralBuffer).toFixed(2));
+        sl = Number((baseSupport - goldStructuralBuffer).toFixed(2));
         let upperResistances = m15Resistances.filter(r => r > entryPrice).sort((a, b) => a - b);
         let rawMinTp = entryPrice + minNetProfitUSD + tpSpreadBuffer;
 
@@ -400,7 +411,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         }
     } else {
         let baseResistance = targetResistance !== null ? targetResistance : (entryPrice + 2.0);
-        sl = Number((baseResistance + slStructuralBuffer).toFixed(2));
+        sl = Number((baseResistance + goldStructuralBuffer).toFixed(2));
         let lowerSupports = m15Supports.filter(s => s < entryPrice).sort((a, b) => b - a);
         let rawMinTp = entryPrice - minNetProfitUSD - tpSpreadBuffer;
 
@@ -419,7 +430,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         pair: pairSymbol,
         timeframe: 'M30->M15->M5',
         status: 'TRIGGERED',
-        strategyName: 'WSM-200 Gold Sniper (M30 Bias + M15 SNR Structure + M5 Wick Execution)',
+        strategyName: 'WSM-200 Gold Sniper (M30 Bias + M15 SNR Structure + M5 Wick Hybrid Buffer)',
         actionType: actionType,
         price: Number(entryPrice.toFixed(2)),
         entryZone: Number(entryPrice.toFixed(2)),
@@ -740,5 +751,5 @@ process.on('uncaughtException', (error) => {
 // SERVER LISTEN
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`HybriOX Autonomous Backend aktif (Siap Produksi) pada port ${PORT}`);
+    console.log(`HybriOX Autonomous Backend aktif (Hybrid Buffer Mode) pada port ${PORT}`);
 });
