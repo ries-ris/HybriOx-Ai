@@ -99,6 +99,16 @@ const PROVIDERS = {
 const marketCache = new Map();
 const CACHE_TTL = 15000;
 
+// Pembersih Cache Otomatis untuk Mencegah Memory Leak (Produksi)
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, val] of marketCache.entries()) {
+        if (now - val.timestamp > CACHE_TTL * 4) {
+            marketCache.delete(key);
+        }
+    }
+}, 60000);
+
 function formatSymbolForProvider(cleanSymbol, provider) {
     if (provider === 'twelveData') {
         if (cleanSymbol.length === 6 && !cleanSymbol.includes('/') && !['BTCUSD', 'ETHUSD'].includes(cleanSymbol)) {
@@ -251,18 +261,15 @@ async function fetchCandlesWithRacing(pairSymbol, timeframeMinutes, maxRetries =
         try {
             let winner = await Promise.any([taskTwelve(), taskFinnhub(), taskAlpha()]);
             if (winner && winner.candles && winner.candles.length > 0) {
-                console.log(`[Provider Racing] Sukses (Percobaan ${attempt}) untuk ${cleanSymbol} (${timeframeMinutes}m) via: ${winner.provider}`);
                 return winner.candles;
             }
         } catch (aggregateError) {
-            console.warn(`[Provider Racing Warning] Percobaan ${attempt}/${maxRetries} gagal total untuk ${cleanSymbol}. Menunggu jarak aman 3 detik...`);
             if (attempt < maxRetries) {
                 await delay(3000);
             }
         }
     }
 
-    console.error(`[Provider Racing Critical] Semua percobaan (${maxRetries}x) gagal untuk ${cleanSymbol}. Sinyal ditahan demi keamanan.`);
     return [];
 }
 
@@ -318,8 +325,9 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     let currentPrice = candlesM5[candlesM5.length - 1][4];
 
     let m30Sample = candlesM30.slice(-400);
-    let m30High = Math.max(...m30Sample.map(c => c[2]));
-    let m30Low = Math.min(...m30Sample.map(c => c[3]));
+    // Proteksi Array Kosong untuk Produksi
+    let m30High = m30Sample.length > 0 ? Math.max(...m30Sample.map(c => c[2])) : currentPrice;
+    let m30Low = m30Sample.length > 0 ? Math.min(...m30Sample.map(c => c[3])) : currentPrice;
     let m30Equilibrium = (m30High + m30Low) / 2;
     let macroBias = currentPrice < m30Equilibrium ? 'DISCOUNT_BUY' : 'PREMIUM_SELL';
 
@@ -347,7 +355,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         let validSupports = m15Supports.filter(s => s < currentPrice);
         if (validSupports.length > 0) {
             targetSupport = Math.max(...validSupports);
-            let m5RecentLows = Math.min(...candlesM5.slice(-6).map(c => c[3]));
+            let m5RecentLows = candlesM5.length >= 6 ? Math.min(...candlesM5.slice(-6).map(c => c[3])) : currentPrice;
             if (Math.abs(m5RecentLows - targetSupport) <= zoneThreshold || (currentPrice >= targetSupport && currentPrice <= targetSupport + (zoneThreshold * 1.5))) {
                 actionType = 'BUY_LIMIT';
             }
@@ -356,7 +364,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         let validResistances = m15Resistances.filter(r => r > currentPrice);
         if (validResistances.length > 0) {
             targetResistance = Math.min(...validResistances);
-            let m5RecentHighs = Math.max(...candlesM5.slice(-6).map(c => c[2]));
+            let m5RecentHighs = candlesM5.length >= 6 ? Math.max(...candlesM5.slice(-6).map(c => c[2])) : currentPrice;
             if (Math.abs(m5RecentHighs - targetResistance) <= zoneThreshold || (currentPrice <= targetResistance && currentPrice >= targetResistance - (zoneThreshold * 1.5))) {
                 actionType = 'SELL_LIMIT';
             }
@@ -589,11 +597,10 @@ app.post('/api/sync', (req, res) => {
     return res.json({ success: true, data: tradeRecord });
 });
 
-// TIER PIPELINE (DIPERBARUI DENGAN DUKUNGAN DEVELOPER MODE)
+// TIER PIPELINE
 function routeSignalThroughTierPipeline(signalData, clientTier) {
     const tier = (clientTier || 'free').toLowerCase();
 
-    // Jika klien adalah developer, izinkan semua sinyal masuk tanpa batas
     if (tier === 'developer' || tier === 'admin') {
         return { 
             ...signalData, 
@@ -611,18 +618,21 @@ function routeSignalThroughTierPipeline(signalData, clientTier) {
     return null;
 }
 
-// WEBSOCKET SERVER (DIPERBARUI MENANGKAP TIER DEVELOPER)
+// WEBSOCKET SERVER DENGAN HEARTBEAT (PENGAMAN PRODUKSI)
 wss.on('connection', (ws) => {
     ws.tier = 'free';
+    ws.isAlive = true;
+
+    ws.on('pong', () => {
+        ws.isAlive = true;
+    });
 
     ws.on('message', async (message) => {
         try {
             const parsed = JSON.parse(message);
 
-            // Menangkap update tier dari klien (termasuk tier 'developer' dari panel)
             if (parsed.tier) {
                 ws.tier = parsed.tier.toLowerCase();
-                console.log(`[WebSocket] Klien teridentifikasi / memperbarui tier ke: ${ws.tier}`);
             }
 
             if (parsed.action === 'FORCE_TRIGGER_SCAN' || parsed.type === 'FORCE_TRIGGER_SCAN') {
@@ -645,6 +655,19 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ error: 'Format tidak valid.' }));
         }
     });
+});
+
+// Interval Heartbeat WebSocket (Mencegah putus koneksi di server cloud)
+const pingInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) return ws.terminate();
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 30000);
+
+wss.on('close', () => {
+    clearInterval(pingInterval);
 });
 
 // AUTONOMOUS SCHEDULER
@@ -705,8 +728,17 @@ setInterval(async () => {
     }
 }, AUTONOMOUS_INTERVAL_MS);
 
+// PENANGANAN ERROR GLOBAL PROSES (PENGAMAN PRODUKSI)
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled Rejection terdeteksi:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception terdeteksi:', error);
+});
+
 // SERVER LISTEN
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`HybriOX Autonomous Backend aktif (dengan Sistem Racing) pada port ${PORT}`);
+    console.log(`HybriOX Autonomous Backend aktif (Siap Produksi) pada port ${PORT}`);
 });
