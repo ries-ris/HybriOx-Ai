@@ -324,12 +324,14 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
     let currentPrice = candlesM5[candlesM5.length - 1][4];
 
+    // 1. MAKRO M30: Menentukan Bias Arah (Discount Buy / Premium Sell)
     let m30Sample = candlesM30.slice(-400);
     let m30High = m30Sample.length > 0 ? Math.max(...m30Sample.map(c => c[2])) : currentPrice;
     let m30Low = m30Sample.length > 0 ? Math.min(...m30Sample.map(c => c[3])) : currentPrice;
     let m30Equilibrium = (m30High + m30Low) / 2;
     let macroBias = currentPrice < m30Equilibrium ? 'DISCOUNT_BUY' : 'PREMIUM_SELL';
 
+    // 2. STRUKTUR M15: Penentuan Matematika TP & S/R Utama (Original)
     let m15Sample = candlesM15.slice(-200);
     let m15Supports = [];
     let m15Resistances = [];
@@ -350,6 +352,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     let targetResistance = null;
     let zoneThreshold = 4.0;
 
+    // 3. EKSEKUSI M5: Konfirmasi Titik Entry (Tertinggi/Terendah Lokal M5)
     if (macroBias === 'DISCOUNT_BUY') {
         let validSupports = m15Supports.filter(s => s < currentPrice);
         if (validSupports.length > 0) {
@@ -375,19 +378,28 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     }
 
     let entryPrice = currentPrice;
-    let tpSpreadBuffer = 0.5;
 
-    // --- KALKULASI HYBRID SL BUFFER KHUSUS XAUUSD (Floor 1.5 + ATR Clamp 7.5 s.d 20) ---
+    // 4. STOP LOSS M5 DINAMIS (Penarikan ATR 80 s.d 100 Candle ke belakang pada M5)
     let trList = [];
     for (let i = 1; i < candlesM5.length; i++) {
         let high = candlesM5[i][2], low = candlesM5[i][3], prevClose = candlesM5[i - 1][4];
         trList.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
     }
-    let baseAtr = trList.length >= 14 ? (trList.slice(-14).reduce((a, b) => a + b, 0) / 14) : (currentPrice * 0.001);
+
+    // Mencari lookback dinamis optimal antara 80 hingga 100 candle
+    let effectiveLookback = 80;
+    for (let p = 80; p <= 100; p += 5) {
+        if (trList.length >= p) {
+            effectiveLookback = p;
+        }
+    }
+
+    let baseAtr = trList.length >= effectiveLookback 
+        ? (trList.slice(-effectiveLookback).reduce((a, b) => a + b, 0) / effectiveLookback) 
+        : (currentPrice * 0.001);
     
     let clampedAtr = Math.max(7.5, Math.min(20, baseAtr * 0.75));
     let goldStructuralBuffer = Math.max(1.5, clampedAtr);
-    // ---------------------------------------------------------------------------------
 
     let sl = 0;
     let rawTargets = [];
@@ -416,7 +428,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         }
     }
 
-    // --- ATURAN KAKU GATE 4: MINIMUM 180 PIPS BERSIH UNTUK TP ---
+    // ATURAN GATE 4: MINIMUM 180 PIPS BERSIH UNTUK TP
     let validTargets = [];
     for (let targetPrice of rawTargets) {
         let distancePips = Math.abs(targetPrice - entryPrice) * 10;
@@ -426,7 +438,6 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     }
 
     if (validTargets.length === 0) {
-        // Fallback otomatis jika struktur terdekat kurang dari 180 pips, paksakan minimal 18.00 (180 pips) dari entry
         let fallbackTp = actionType === 'BUY_LIMIT' ? entryPrice + 18.0 : entryPrice - 18.0;
         validTargets.push(Number(fallbackTp.toFixed(2)));
     }
@@ -440,7 +451,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         pair: pairSymbol,
         timeframe: 'M30->M15->M5',
         status: 'TRIGGERED',
-        strategyName: 'WSM-200 Gold Sniper (Hybrid Buffer + Min 180 Pips TP)',
+        strategyName: 'WSM-200 Gold Sniper (M5 Dynamic SL 80-100 + M15 TP Original)',
         actionType: actionType,
         price: Number(entryPrice.toFixed(2)),
         entryZone: Number(entryPrice.toFixed(2)),
@@ -455,6 +466,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         timestamp: Date.now()
     };
 }
+
 
 // REST API ENDPOINTS
 app.get('/api/macro/latest', async (req, res) => {
