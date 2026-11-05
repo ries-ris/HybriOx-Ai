@@ -2,7 +2,7 @@
  * HybriOX Professional-Grade Backend Proxy & Asset Management Server (Final Master Version)
  * - Full Multi-Provider Support & High-Speed Racing Architecture (Twelve Data vs Finnhub vs Alpha Vantage)
  * - Strict Master Registry Whitelist (Authorized Instruments)
- * - XAUUSDInstitutionalEngine (Top-Down M30 -> M15 -> M5 & Hybrid SL Buffer + Min 180 Pips TP)
+ * - WSM200InstitutionalStrategy (Top-Down M30 -> M15 -> M5 & Strict Net Profit Minimum $2.00 Validation)
  * - Autonomous Forex Factory News Guard (High-Impact USD Filter - 30 Min Window)
  * - Tier Distribution Pipeline & WebSocket Integration (Dengan Dukungan Developer Mode)
  * - ES Module Syntax (Compatible with package.json "type": "module")
@@ -317,6 +317,7 @@ async function runInstitutionalEnginePipeline(pairSymbol, timeframe) {
     }
 }
 
+// WSM-200 GOLD STRICT ENGINE (Dengan Validasi Net Profit Minimal $2.00 & Tanpa Fallback)
 function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, pairSymbol) {
     let cleanSym = (pairSymbol || "").toUpperCase();
     let isGold = cleanSym.includes("XAU") || cleanSym.includes("GOLD");
@@ -331,7 +332,7 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
     let m30Equilibrium = (m30High + m30Low) / 2;
     let macroBias = currentPrice < m30Equilibrium ? 'DISCOUNT_BUY' : 'PREMIUM_SELL';
 
-    // 2. STRUKTUR M15: Penentuan Matematika TP & S/R Utama (Original)
+    // 2. STRUKTUR M15: Penentuan S/R untuk Target TP
     let m15Sample = candlesM15.slice(-200);
     let m15Supports = [];
     let m15Resistances = [];
@@ -347,12 +348,28 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
         }
     }
 
+    // 3. STRUKTUR M5: Penentuan S/R Mikro untuk Basis Stop Loss (SL)
+    let m5Sample = candlesM5.slice(-200);
+    let m5Supports = [];
+    let m5Resistances = [];
+
+    for (let i = 2; i < m5Sample.length - 2; i++) {
+        let h = m5Sample[i][2];
+        let l = m5Sample[i][3];
+        if (h > m5Sample[i-1][2] && h > m5Sample[i-2][2] && h > m5Sample[i+1][2] && h > m5Sample[i+2][2]) {
+            m5Resistances.push(h);
+        }
+        if (l < m5Sample[i-1][3] && l < m5Sample[i-2][3] && l < m5Sample[i+1][3] && l < m5Sample[i+2][3]) {
+            m5Supports.push(l);
+        }
+    }
+
     let actionType = null;
     let targetSupport = null;
     let targetResistance = null;
     let zoneThreshold = 4.0;
 
-    // 3. EKSEKUSI M5: Konfirmasi Titik Entry (Tertinggi/Terendah Lokal M5)
+    // 4. EKSEKUSI M5: Konfirmasi Titik Entry
     if (macroBias === 'DISCOUNT_BUY') {
         let validSupports = m15Supports.filter(s => s < currentPrice);
         if (validSupports.length > 0) {
@@ -379,14 +396,13 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
     let entryPrice = currentPrice;
 
-    // 4. STOP LOSS M5 DINAMIS (Penarikan ATR 80 s.d 100 Candle ke belakang pada M5)
+    // 5. STOP LOSS M5 DINAMIS + BUFFER ATR
     let trList = [];
     for (let i = 1; i < candlesM5.length; i++) {
         let high = candlesM5[i][2], low = candlesM5[i][3], prevClose = candlesM5[i - 1][4];
         trList.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
     }
 
-    // Mencari lookback dinamis optimal antara 80 hingga 100 candle
     let effectiveLookback = 80;
     for (let p = 80; p <= 100; p += 5) {
         if (trList.length >= p) {
@@ -403,55 +419,61 @@ function evaluateWSM200InstitutionalStrategy(candlesM30, candlesM15, candlesM5, 
 
     let sl = 0;
     let rawTargets = [];
-    let tp1 = 0, tp2 = null, tp3 = null;
-    let tpCount = 1;
 
     if (actionType === 'BUY_LIMIT') {
-        let baseSupport = targetSupport !== null ? targetSupport : (entryPrice - 2.0);
-        sl = Number((baseSupport - goldStructuralBuffer).toFixed(2));
-        let upperResistances = m15Resistances.filter(r => r > entryPrice).sort((a, b) => a - b);
-        
-        if (upperResistances.length > 0) {
-            rawTargets = upperResistances;
-        } else {
-            rawTargets = [entryPrice + 20.0];
-        }
-    } else {
-        let baseResistance = targetResistance !== null ? targetResistance : (entryPrice + 2.0);
-        sl = Number((baseResistance + goldStructuralBuffer).toFixed(2));
-        let lowerSupports = m15Supports.filter(s => s < entryPrice).sort((a, b) => b - a);
+        let validM5Supports = m5Supports.filter(s => s < entryPrice);
+        let baseM5Support = validM5Supports.length > 0 ? Math.max(...validM5Supports) : (entryPrice - 2.0);
+        sl = Number((baseM5Support - goldStructuralBuffer).toFixed(2));
 
-        if (lowerSupports.length > 0) {
-            rawTargets = lowerSupports;
-        } else {
-            rawTargets = [entryPrice - 20.0];
-        }
+        let upperResistances = m15Resistances.filter(r => r > entryPrice).sort((a, b) => a - b);
+        rawTargets = upperResistances;
+    } else {
+        let validM5Resistances = m5Resistances.filter(r => r > entryPrice);
+        let baseM5Resistance = validM5Resistances.length > 0 ? Math.min(...validM5Resistances) : (entryPrice + 2.0);
+        sl = Number((baseM5Resistance + goldStructuralBuffer).toFixed(2));
+
+        let lowerSupports = m15Supports.filter(s => s < entryPrice).sort((a, b) => b - a);
+        rawTargets = lowerSupports;
     }
 
-    // ATURAN GATE 4: MINIMUM 180 PIPS BERSIH UNTUK TP
+    // 6. VALIDASI STRICT: TARGET BERSIH MINIMAL $2.00 BERDASARKAN SNR M15 TANPA FALLBACK
+    let brokerSpread = 0.36;     // Spread riil MT5 ($0.36)
+    let brokerCommission = 0.07; // Komisi broker standar ($0.07)
+    let safetyBuffer = 0.25;     // Buffer pengaman ($0.25)
+    let totalCostDeduction = brokerSpread + brokerCommission + safetyBuffer; // Total $0.68
+
+    let targetNetMinimumUsd = 2.0; // Target bersih minimal $2.00
+
     let validTargets = [];
     for (let targetPrice of rawTargets) {
-        let distancePips = Math.abs(targetPrice - entryPrice) * 10;
-        if (distancePips >= 180) {
+        let rawDistanceUsd = Math.abs(targetPrice - entryPrice);
+        let netDistanceUsd = rawDistanceUsd - totalCostDeduction;
+
+        // Validasi mutlak berdasarkan struktur SNR M15 riil
+        if (netDistanceUsd >= targetNetMinimumUsd) {
             validTargets.push(targetPrice);
         }
     }
 
+    // STRICT RULE: Jika struktur SNR M15 tidak mencukupi target bersih, TOLAK sinyal.
     if (validTargets.length === 0) {
-        let fallbackTp = actionType === 'BUY_LIMIT' ? entryPrice + 18.0 : entryPrice - 18.0;
-        validTargets.push(Number(fallbackTp.toFixed(2)));
+        return { 
+            status: 'NO_SIGNAL', 
+            reason: 'Ditolak: Struktur SNR M15 tidak memenuhi syarat minimum net profit $2.00 setelah dikurangi biaya transaksi.' 
+        };
     }
 
-    tp1 = validTargets[0] || null;
-    if (validTargets.length > 1) { tp2 = validTargets[1]; tpCount = 2; }
-    if (validTargets.length > 2) { tp3 = validTargets[2]; tpCount = 3; }
+    let tp1 = validTargets[0] || null;
+    let tp2 = validTargets.length > 1 ? validTargets[1] : null;
+    let tp3 = validTargets.length > 2 ? validTargets[2] : null;
+    let tpCount = validTargets.length;
 
     return {
-        signalId: 'WSM200_GOLD_' + Date.now(),
+        signalId: 'WSM200_GOLD_STRICT_' + Date.now(),
         pair: pairSymbol,
-        timeframe: 'M30->M15->M5',
+        timeframe: 'M30->M15(Strict TP)->M5(SL M5+ATR)',
         status: 'TRIGGERED',
-        strategyName: 'WSM-200 Gold Sniper (M5 Dynamic SL 80-100 + M15 TP Original)',
+        strategyName: 'WSM-200 Gold Strict Engine (No Fallback TP)',
         actionType: actionType,
         price: Number(entryPrice.toFixed(2)),
         entryZone: Number(entryPrice.toFixed(2)),
